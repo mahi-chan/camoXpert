@@ -1,5 +1,7 @@
+import torch
 import torch.nn as nn
-from models.backbone import LayerNorm2d
+from backbone import LayerNorm2d
+
 
 class SegmentationHead(nn.Module):
     """

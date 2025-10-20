@@ -1,17 +1,10 @@
-# cod_metrics.py
-
 import torch
+import torch.nn.functional as F
+
 
 class CODMetrics:
     """
     Comprehensive metrics for camouflaged object detection evaluation.
-
-    Implements:
-    - MAE (Mean Absolute Error)
-    - F-measure (Weighted F-score)
-    - S-measure (Structure measure)
-    - E-measure (Enhanced alignment measure)
-    - IoU (Intersection over Union)
     """
 
     @staticmethod
@@ -21,11 +14,7 @@ class CODMetrics:
 
     @staticmethod
     def f_measure(pred, target, beta=0.3):
-        """
-        Weighted F-measure.
-
-        F_β = (1 + β²) * Precision * Recall / (β² * Precision + Recall)
-        """
+        """Weighted F-measure."""
         pred_binary = (pred > 0.5).float()
 
         tp = torch.sum(pred_binary * target)
@@ -43,12 +32,7 @@ class CODMetrics:
 
     @staticmethod
     def s_measure(pred, target, alpha=0.5):
-        """
-        Structure measure combining region and object similarity.
-
-        S = α * S_r + (1 - α) * S_o
-        """
-        # Region similarity
+        """Structure measure combining region and object similarity."""
         pred_mean = torch.mean(pred)
         target_mean = torch.mean(target)
 
@@ -61,7 +45,6 @@ class CODMetrics:
 
         s_r = (correlation + 1) / 2
 
-        # Object similarity
         intersection = torch.min(pred, target)
         s_o = torch.mean(intersection) / (torch.mean(torch.max(pred, target)) + 1e-10)
 
@@ -69,22 +52,14 @@ class CODMetrics:
 
     @staticmethod
     def e_measure(pred, target):
-        """
-        Enhanced alignment measure for boundary quality.
-        """
-        # Alignment matrix
+        """Enhanced alignment measure for boundary quality."""
         align_matrix = 2 * pred * target / (pred ** 2 + target ** 2 + 1e-10)
-
-        # Enhanced mean
         e_measure = torch.mean(align_matrix).item()
-
         return e_measure
 
     @staticmethod
     def iou(pred, target, threshold=0.5):
-        """
-        Intersection over Union (Jaccard Index).
-        """
+        """Intersection over Union (Jaccard Index)."""
         pred_binary = (pred > threshold).float()
 
         intersection = torch.sum(pred_binary * target)
@@ -96,12 +71,7 @@ class CODMetrics:
 
     @classmethod
     def compute_all(cls, pred, target):
-        """
-        Compute all metrics at once.
-
-        Returns:
-            dict: Dictionary containing all metric values
-        """
+        """Compute all metrics at once."""
         return {
             'MAE': cls.mae(pred, target),
             'F-measure': cls.f_measure(pred, target),

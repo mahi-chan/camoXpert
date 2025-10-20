@@ -1,12 +1,10 @@
-# benchmarks.py
-
 import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from models.utils import count_parameters
 from models.fusion import BiLevelFusion
 from models.segmentation_head import SegmentationHead
-from metrics import CODMetrics  # Assuming CODMetrics is implemented in a metrics.py file
+from metrics.cod_metrics import CODMetrics
 
 
 def evaluate_model(model, dataset, batch_size, device):

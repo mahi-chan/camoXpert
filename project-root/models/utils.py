@@ -46,7 +46,7 @@ def save_checkpoint(state: dict, checkpoint_dir: str, filename: str = 'checkpoin
     os.makedirs(checkpoint_dir, exist_ok=True)
     checkpoint_path = os.path.join(checkpoint_dir, filename)
     torch.save(state, checkpoint_path)
-    print(f"✅ Checkpoint saved at {checkpoint_path}")
+    print(f"Checkpoint saved at {checkpoint_path}")
 
 
 def load_checkpoint(checkpoint_path: str, model: torch.nn.Module, optimizer: torch.optim.Optimizer = None):
@@ -64,11 +64,11 @@ def load_checkpoint(checkpoint_path: str, model: torch.nn.Module, optimizer: tor
     if not os.path.isfile(checkpoint_path):
         raise FileNotFoundError(f"Checkpoint not found at {checkpoint_path}")
 
-    checkpoint = torch.load(checkpoint_path)
+    checkpoint = torch.load(checkpoint_path, map_location='cpu')
     model.load_state_dict(checkpoint['model_state_dict'])
-    if optimizer:
+    if optimizer and 'optimizer_state_dict' in checkpoint:
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
-    print(f"✅ Checkpoint loaded from {checkpoint_path}")
+    print(f" Checkpoint loaded from {checkpoint_path}")
     return checkpoint.get('epoch', 0)
 
 
@@ -95,4 +95,3 @@ def create_directory(path: str):
         path (str): Path to the directory.
     """
     Path(path).mkdir(parents=True, exist_ok=True)
-    print(f"✅ Directory created: {path}")

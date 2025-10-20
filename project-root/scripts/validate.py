@@ -1,4 +1,3 @@
-# validate.py
 
 import argparse
 import torch

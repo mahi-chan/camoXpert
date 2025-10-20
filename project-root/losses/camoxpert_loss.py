@@ -1,8 +1,7 @@
-# camoxpert_loss.py
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
 
 class DiceLoss(nn.Module):
     def __init__(self, smooth=1.0):
@@ -16,6 +15,7 @@ class DiceLoss(nn.Module):
         union = pred_flat.sum() + target_flat.sum()
         dice = (2. * intersection + self.smooth) / (union + self.smooth)
         return 1 - dice
+
 
 class StructureLoss(nn.Module):
     def __init__(self):
@@ -34,14 +34,18 @@ class StructureLoss(nn.Module):
         pred_edges = self.compute_edges(pred)
         target_edges = self.compute_edges(target)
         edge_loss = F.mse_loss(pred_edges, target_edges)
+
         pred_mean, target_mean = pred.mean(), target.mean()
         pred_std, target_std = pred.std(), target.std()
         covariance = ((pred - pred_mean) * (target - target_mean)).mean()
+
         c1, c2 = 0.01 ** 2, 0.03 ** 2
         ssim = ((2 * pred_mean * target_mean + c1) * (2 * covariance + c2)) / \
                ((pred_mean ** 2 + target_mean ** 2 + c1) * (pred_std ** 2 + target_std ** 2 + c2))
         region_loss = 1 - ssim
+
         return edge_loss + region_loss
+
 
 class CamoXpertLoss(nn.Module):
     def __init__(self, bce_weight=0.3, dice_weight=0.3, structure_weight=0.4):
@@ -57,10 +61,12 @@ class CamoXpertLoss(nn.Module):
         bce = self.bce_loss(pred, target)
         dice = self.dice_loss(pred, target)
         structure = self.structure_loss(pred, target)
+
         total_loss = (self.bce_weight * bce +
                       self.dice_weight * dice +
                       self.structure_weight * structure +
                       aux_loss)
+
         return total_loss, {
             'total': total_loss.item(),
             'bce': bce.item(),

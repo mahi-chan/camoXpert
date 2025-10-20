@@ -1,51 +1,36 @@
-# inference.py
-
 import argparse
+import os
+import sys
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import torch
 import cv2
 import numpy as np
 from pathlib import Path
+
+from models.camoxpert import CamoXpert
 from models.utils import load_checkpoint
-from models.segmentation_head import SegmentationHead
-from models.fusion import BiLevelFusion
-from models.utils import LayerNorm2d
-from models.backbone import EdgeNeXtBackbone
-from models.moe import CamoXpert  # Assuming CamoXpert is implemented in models.moe
+
 
 def preprocess_image(image_path, img_size):
-    """
-    Preprocess the input image for inference.
-
-    Args:
-        image_path (str): Path to the input image.
-        img_size (int): Target image size.
-
-    Returns:
-        torch.Tensor: Preprocessed image tensor.
-    """
+    """Preprocess the input image for inference."""
     image = cv2.imread(image_path)
     image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    original_size = image.shape[:2]
     image = cv2.resize(image, (img_size, img_size), interpolation=cv2.INTER_CUBIC)
-    image = image / 255.0  # Normalize to [0, 1]
-    image = (image - np.array([0.485, 0.456, 0.406])) / np.array([0.229, 0.224, 0.225])  # ImageNet normalization
-    image = torch.tensor(image.transpose(2, 0, 1), dtype=torch.float32).unsqueeze(0)  # Add batch dimension
-    return image
+    image = image / 255.0
+    image = (image - np.array([0.485, 0.456, 0.406])) / np.array([0.229, 0.224, 0.225])
+    image = torch.tensor(image.transpose(2, 0, 1), dtype=torch.float32).unsqueeze(0)
+    return image, original_size
+
 
 def postprocess_mask(mask, original_size):
-    """
-    Postprocess the output mask.
-
-    Args:
-        mask (torch.Tensor): Predicted mask tensor.
-        original_size (tuple): Original image size (height, width).
-
-    Returns:
-        np.ndarray: Binary mask resized to the original size.
-    """
+    """Postprocess the output mask."""
     mask = mask.squeeze().cpu().numpy()
-    mask = (mask > 0.5).astype(np.uint8)  # Threshold to binary mask
-    mask = cv2.resize(mask, original_size[::-1], interpolation=cv2.INTER_NEAREST)
+    mask = (mask > 0.5).astype(np.uint8)
+    mask = cv2.resize(mask, (original_size[1], original_size[0]), interpolation=cv2.INTER_NEAREST)
     return mask
+
 
 def main(args):
     # Load the model
@@ -55,22 +40,21 @@ def main(args):
     model.eval()
 
     # Preprocess the input image
-    image = preprocess_image(args.image_path, args.img_size)
-    original_size = cv2.imread(args.image_path).shape[:2]  # Original image size
+    image, original_size = preprocess_image(args.image_path, args.img_size)
     image = image.to(args.device)
 
     # Perform inference
     with torch.no_grad():
         output, _ = model(image)
-        mask = output.sigmoid()  # Apply sigmoid activation
 
     # Postprocess the mask
-    binary_mask = postprocess_mask(mask, original_size)
+    binary_mask = postprocess_mask(output, original_size)
 
     # Save the output mask
     output_path = Path(args.output_dir) / f"{Path(args.image_path).stem}_mask.png"
     cv2.imwrite(str(output_path), binary_mask * 255)
-    print(f"✅ Mask saved to {output_path}")
+    print(f"Mask saved to {output_path}")
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="CamoXpert Inference Script")
@@ -81,7 +65,5 @@ if __name__ == "__main__":
     parser.add_argument("--device", type=str, default="cuda", help="Device to run inference on")
     args = parser.parse_args()
 
-    # Create output directory if it doesn't exist
     Path(args.output_dir).mkdir(parents=True, exist_ok=True)
-
     main(args)

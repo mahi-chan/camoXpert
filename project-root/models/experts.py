@@ -1,14 +1,15 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from models.backbone import LayerNorm2d
-from models.backbone import SDTAEncoder  # Assuming SDTAEncoder is defined in `backbone.py`
+from backbone import LayerNorm2d, SDTAEncoder
+
 
 class TextureExpert(nn.Module):
     """
     Texture-focused expert using multi-scale dilated convolutions.
     Captures fine-grained patterns critical for camouflage detection.
     """
+
     def __init__(self, dim):
         super().__init__()
         self.branch1 = nn.Sequential(
@@ -52,6 +53,7 @@ class AttentionExpert(nn.Module):
     Attention-based expert for global context understanding.
     Uses efficient self-attention to capture long-range dependencies.
     """
+
     def __init__(self, dim, num_heads=8):
         super().__init__()
         self.attention = SDTAEncoder(
@@ -69,6 +71,7 @@ class HybridExpert(nn.Module):
     Hybrid expert combining local and global processing.
     Balances efficiency and effectiveness.
     """
+
     def __init__(self, dim):
         super().__init__()
         self.local_branch = nn.Sequential(
@@ -92,3 +95,73 @@ class HybridExpert(nn.Module):
         out = local_feat * global_weight
         out = self.fusion(out)
         return out + x
+
+
+class ExpertRouter(nn.Module):
+    """
+    Dynamic router for selecting experts based on input features.
+    """
+
+    def __init__(self, dim, num_experts=3):
+        super().__init__()
+        self.num_experts = num_experts
+        self.gate = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Flatten(),
+            nn.Linear(dim, dim // 4),
+            nn.GELU(),
+            nn.Linear(dim // 4, num_experts),
+            nn.Softmax(dim=-1)
+        )
+
+    def forward(self, x):
+        # Get routing weights
+        weights = self.gate(x)  # [B, num_experts]
+        return weights
+
+
+class MoELayer(nn.Module):
+    """
+    Mixture of Experts layer with dynamic routing.
+    """
+
+    def __init__(self, dim, num_experts=3):
+        super().__init__()
+        self.experts = nn.ModuleList([
+            TextureExpert(dim),
+            AttentionExpert(dim),
+            HybridExpert(dim)
+        ])
+        self.router = ExpertRouter(dim, num_experts)
+        self.num_experts = num_experts
+
+    def forward(self, x):
+        # Get routing weights
+        routing_weights = self.router(x)  # [B, num_experts]
+
+        # Process through each expert
+        expert_outputs = []
+        for expert in self.experts:
+            expert_outputs.append(expert(x))
+
+        # Stack expert outputs
+        expert_outputs = torch.stack(expert_outputs, dim=1)  # [B, num_experts, C, H, W]
+
+        # Apply routing weights
+        routing_weights = routing_weights.view(x.size(0), self.num_experts, 1, 1, 1)
+        output = (expert_outputs * routing_weights).sum(dim=1)
+
+        # Calculate auxiliary loss (load balancing)
+        aux_loss = self.calculate_aux_loss(routing_weights.squeeze(-1).squeeze(-1).squeeze(-1))
+
+        return output, aux_loss
+
+    def calculate_aux_loss(self, routing_weights):
+        """
+        Calculate auxiliary loss for load balancing.
+        """
+        # Encourage equal distribution across experts
+        mean_routing = routing_weights.mean(dim=0)
+        target_dist = torch.ones_like(mean_routing) / self.num_experts
+        aux_loss = F.mse_loss(mean_routing, target_dist)
+        return aux_loss * 0.01  # Scale down the auxiliary loss
