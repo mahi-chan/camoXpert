@@ -1,10 +1,10 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from backbone import EdgeNeXtBackbone
-from experts import MoELayer
-from fusion import BiLevelFusion
-from segmentation_head import SegmentationHead
+from models.backbone import EdgeNeXtBackbone
+from models.experts import MoELayer
+from models.fusion import BiLevelFusion
+from models.segmentation_head import SegmentationHead
 
 
 class CamoXpert(nn.Module):

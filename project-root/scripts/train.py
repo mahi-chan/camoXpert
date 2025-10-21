@@ -2,7 +2,7 @@ import argparse
 import os
 import sys
 
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import torch
 from torch.utils.data import DataLoader
@@ -14,7 +14,7 @@ from models.camoxpert import CamoXpert
 from data.dataset import COD10KDataset
 from losses.camoxpert_loss import CamoXpertLoss
 from metrics.cod_metrics import CODMetrics
-from models.utils import count_parameters, save_checkpoint, set_seed, load_config
+from models.utils import count_parameters, save_checkpoint, set_seed
 
 
 def train_one_epoch(model, dataloader, criterion, optimizer, device):
@@ -60,17 +60,25 @@ def validate(model, dataloader, criterion, metrics, device):
 def main(args):
     # Set device
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
 
     # Set random seed
     set_seed(args.seed)
 
     # Load datasets
+    print("Loading datasets...")
     train_dataset = COD10KDataset(root_dir=args.dataset_path, split='train', img_size=args.img_size, augment=True)
     val_dataset = COD10KDataset(root_dir=args.dataset_path, split='val', img_size=args.img_size, augment=False)
-    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=4)
-    val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=4)
+
+    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True,
+                              num_workers=args.num_workers, pin_memory=True)
+    val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False,
+                            num_workers=args.num_workers, pin_memory=True)
+
+    print(f"Train samples: {len(train_dataset)}, Val samples: {len(val_dataset)}")
 
     # Initialize model
+    print("Initializing model...")
     model = CamoXpert(in_channels=3, num_classes=1).to(device)
     total_params, trainable_params = count_parameters(model)
     print(f"Total Parameters: {total_params:,}")
@@ -84,8 +92,13 @@ def main(args):
     # Metrics
     metrics = CODMetrics()
 
+    # Create checkpoint directory
+    os.makedirs(args.checkpoint_dir, exist_ok=True)
+
     # Training loop
     best_iou = 0
+    print(f"\nStarting training for {args.epochs} epochs...")
+
     for epoch in range(args.epochs):
         print(f"\nEpoch {epoch + 1}/{args.epochs}")
 
@@ -100,7 +113,8 @@ def main(args):
 
         # Print metrics
         print(f"Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}")
-        print(f"Val Metrics: {val_metrics}")
+        print(f"Val Metrics - MAE: {val_metrics['MAE']:.4f}, IoU: {val_metrics['IoU']:.4f}, "
+              f"F-measure: {val_metrics['F-measure']:.4f}")
 
         # Save checkpoint if best model
         if val_metrics['IoU'] > best_iou:
@@ -112,8 +126,8 @@ def main(args):
                 'best_iou': best_iou,
                 'val_metrics': val_metrics
             }
-            save_checkpoint(checkpoint, args.checkpoint_dir, f'best_model.pth')
-            print(f"✅ New best model saved! IoU: {best_iou:.4f}")
+            save_checkpoint(checkpoint, args.checkpoint_dir, 'best_model.pth')
+            print(f"New best model saved! IoU: {best_iou:.4f}")
 
         # Save periodic checkpoint
         if (epoch + 1) % 10 == 0:
@@ -125,20 +139,25 @@ def main(args):
             }
             save_checkpoint(checkpoint, args.checkpoint_dir, f'checkpoint_epoch_{epoch + 1}.pth')
 
+    print("\n")
+    print(f"Training completed! Best IoU: {best_iou:.4f}")
+
+
+# Create parser at module level
+parser = argparse.ArgumentParser(description="CamoXpert Training Script")
+parser.add_argument("--dataset-path", type=str, required=True, help="Path to the dataset")
+parser.add_argument("--checkpoint-dir", type=str, default="./checkpoints", help="Directory to save checkpoints")
+parser.add_argument("--batch-size", type=int, default=8, help="Batch size for training")
+parser.add_argument("--img-size", type=int, default=352, help="Image size for training")
+parser.add_argument("--epochs", type=int, default=100, help="Number of training epochs")
+parser.add_argument("--lr", type=float, default=0.0001, help="Learning rate")
+parser.add_argument("--weight-decay", type=float, default=0.00001, help="Weight decay")
+parser.add_argument("--t0", type=int, default=10, help="T_0 for cosine annealing")
+parser.add_argument("--t-mult", type=int, default=2, help="T_mult for cosine annealing")
+parser.add_argument("--seed", type=int, default=42, help="Random seed")
+parser.add_argument("--device", type=str, default="cuda", help="Device to run training on")
+parser.add_argument("--num-workers", type=int, default=4, help="Number of data loading workers")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="CamoXpert Training Script")
-    parser.add_argument("--dataset-path", type=str, required=True, help="Path to the dataset")
-    parser.add_argument("--checkpoint-dir", type=str, default="./checkpoints", help="Directory to save checkpoints")
-    parser.add_argument("--batch-size", type=int, default=8, help="Batch size for training")
-    parser.add_argument("--img-size", type=int, default=352, help="Image size for training")
-    parser.add_argument("--epochs", type=int, default=100, help="Number of training epochs")
-    parser.add_argument("--lr", type=float, default=0.0001, help="Learning rate")
-    parser.add_argument("--weight-decay", type=float, default=0.00001, help="Weight decay")
-    parser.add_argument("--t0", type=int, default=10, help="T_0 for cosine annealing")
-    parser.add_argument("--t-mult", type=int, default=2, help="T_mult for cosine annealing")
-    parser.add_argument("--seed", type=int, default=42, help="Random seed")
-    parser.add_argument("--device", type=str, default="cuda", help="Device to run training on")
     args = parser.parse_args()
-
     main(args)

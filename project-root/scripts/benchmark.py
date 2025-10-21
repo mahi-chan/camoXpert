@@ -1,10 +1,17 @@
+import argparse
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 import torch
 from torch.utils.data import DataLoader
 from tqdm import tqdm
-from models.utils import count_parameters
-from models.fusion import BiLevelFusion
-from models.segmentation_head import SegmentationHead
+
+from models.camoxpert import CamoXpert
+from data.dataset import COD10KDataset
 from metrics.cod_metrics import CODMetrics
+from models.utils import count_parameters
 
 
 def evaluate_model(model, dataset, batch_size, device):
@@ -20,7 +27,7 @@ def evaluate_model(model, dataset, batch_size, device):
     Returns:
         dict: Dictionary containing evaluation metrics.
     """
-    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=4)
+    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=False, num_workers=4, pin_memory=True)
     model.eval()
     metrics = CODMetrics()
     all_metrics = []
@@ -37,27 +44,22 @@ def evaluate_model(model, dataset, batch_size, device):
     return aggregated_metrics
 
 
-if __name__ == "__main__":
-    import argparse
-    from models.camo_xpert import CamoXpert  # Assuming the main model is implemented in camo_xpert.py
-    from dataset import COD10KDataset  # Assuming the dataset class is implemented in dataset.py
-
-    # Parse arguments
-    parser = argparse.ArgumentParser(description="Benchmark CamoXpert on COD datasets")
-    parser.add_argument("--dataset-path", type=str, required=True, help="Path to the dataset")
-    parser.add_argument("--checkpoint", type=str, required=True, help="Path to the model checkpoint")
-    parser.add_argument("--batch-size", type=int, default=8, help="Batch size for evaluation")
-    parser.add_argument("--img-size", type=int, default=352, help="Image size for evaluation")
-    parser.add_argument("--device", type=str, default="cuda", help="Device to run evaluation on")
-    args = parser.parse_args()
+def main(args):
+    # Set device
+    device = torch.device(args.device if torch.cuda.is_available() else "cpu")
+    print(f"Using device: {device}")
 
     # Load dataset
+    print("Loading benchmark dataset...")
     dataset = COD10KDataset(root_dir=args.dataset_path, split="test", img_size=args.img_size, augment=False)
+    print(f"Benchmark samples: {len(dataset)}")
 
     # Load model
+    print("Loading model...")
     model = CamoXpert(in_channels=3, num_classes=1)
-    model.load_state_dict(torch.load(args.checkpoint)["model_state_dict"])
-    model = model.to(args.device)
+    checkpoint = torch.load(args.checkpoint, map_location=device)
+    model.load_state_dict(checkpoint["model_state_dict"])
+    model = model.to(device)
 
     # Print model statistics
     total_params, trainable_params = count_parameters(model)
@@ -65,7 +67,25 @@ if __name__ == "__main__":
     print(f"Trainable Parameters: {trainable_params:,}")
 
     # Evaluate model
-    metrics = evaluate_model(model, dataset, args.batch_size, args.device)
-    print("\nBenchmark Results:")
+    print("\nBenchmarking model...")
+    metrics = evaluate_model(model, dataset, args.batch_size, device)
+
+    print("\n" + "=" * 70)
+    print("BENCHMARK RESULTS")
+    print("=" * 70)
     for metric, value in metrics.items():
-        print(f"{metric}: {value:.4f}")
+        print(f"{metric:.<30} {value:.4f}")
+    print("=" * 70)
+
+
+# Create parser at module level
+parser = argparse.ArgumentParser(description="Benchmark CamoXpert on COD datasets")
+parser.add_argument("--dataset-path", type=str, required=True, help="Path to the dataset")
+parser.add_argument("--checkpoint", type=str, required=True, help="Path to the model checkpoint")
+parser.add_argument("--batch-size", type=int, default=8, help="Batch size for evaluation")
+parser.add_argument("--img-size", type=int, default=352, help="Image size for evaluation")
+parser.add_argument("--device", type=str, default="cuda", help="Device to run evaluation on")
+
+if __name__ == "__main__":
+    args = parser.parse_args()
+    main(args)

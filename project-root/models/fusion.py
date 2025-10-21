@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from backbone import LayerNorm2d
+from models.backbone import LayerNorm2d
 
 
 class BiLevelFusion(nn.Module):
