@@ -26,8 +26,11 @@ class StructureLoss(nn.Module):
         self.register_buffer('sobel_y', sobel_y)
 
     def compute_edges(self, x):
-        edges_x = F.conv2d(x, self.sobel_x, padding=1)
-        edges_y = F.conv2d(x, self.sobel_y, padding=1)
+        sobel_x = self.sobel_x.to(x.device)
+        sobel_y = self.sobel_y.to(x.device)
+
+        edges_x = F.conv2d(x, sobel_x, padding=1)
+        edges_y = F.conv2d(x, sobel_y, padding=1)
         return torch.sqrt(edges_x ** 2 + edges_y ** 2 + 1e-8)
 
     def forward(self, pred, target):
