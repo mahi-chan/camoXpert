@@ -4,11 +4,12 @@ import torch.nn.functional as F
 
 
 class CamoXpertLoss(nn.Module):
-    def __init__(self, bce_weight=1.0, iou_weight=1.0, ssim_weight=0.5):
+    def __init__(self, bce_weight=1.0, iou_weight=1.0, ssim_weight=0.5, aux_weight=0.01):
         super().__init__()
         self.bce_weight = bce_weight
         self.iou_weight = iou_weight
         self.ssim_weight = ssim_weight
+        self.aux_weight = aux_weight
         self.bce = nn.BCELoss()
 
     def iou_loss(self, pred, target):
@@ -37,13 +38,19 @@ class CamoXpertLoss(nn.Module):
 
         return 1 - ssim_map.mean()
 
-    def forward(self, pred, target):
+    def forward(self, pred, target, aux_loss=0):
         bce_loss = self.bce(pred, target)
         iou_loss = self.iou_loss(pred, target)
         ssim_loss = self.ssim_loss(pred, target)
 
         total_loss = (self.bce_weight * bce_loss +
                       self.iou_weight * iou_loss +
-                      self.ssim_weight * ssim_loss)
+                      self.ssim_weight * ssim_loss +
+                      self.aux_weight * aux_loss)
 
-        return total_loss
+        return total_loss, {
+            'bce': bce_loss.item(),
+            'iou': iou_loss.item(),
+            'ssim': ssim_loss.item(),
+            'aux': aux_loss if isinstance(aux_loss, float) else aux_loss.item()
+        }
