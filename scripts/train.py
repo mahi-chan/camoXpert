@@ -7,156 +7,154 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import torch
 from torch.utils.data import DataLoader
 from torch.optim import AdamW
-from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts
+from torch.optim.lr_scheduler import CosineAnnealingLR
 from tqdm import tqdm
+import json
+from datetime import datetime
 
 from models.camoxpert import CamoXpert
 from data.dataset import COD10KDataset
 from losses.camoxpert_loss import CamoXpertLoss
 from metrics.cod_metrics import CODMetrics
-from models.utils import count_parameters, save_checkpoint, set_seed
+from models.utils import count_parameters, set_seed
 
 
 def train_one_epoch(model, dataloader, criterion, optimizer, device):
     model.train()
     epoch_loss = 0
-    progress_bar = tqdm(dataloader, desc="Training")
-
-    for images, masks in progress_bar:
+    for images, masks in tqdm(dataloader, desc="Training", ncols=100):
         images, masks = images.to(device), masks.to(device)
-
-        optimizer.zero_grad()
         outputs, aux_loss = model(images)
-        loss, loss_dict = criterion(outputs, masks, aux_loss)
+        loss, _ = criterion(outputs, masks, aux_loss)
+        optimizer.zero_grad()
         loss.backward()
+        torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
-
         epoch_loss += loss.item()
-        progress_bar.set_postfix(loss=loss.item())
-
     return epoch_loss / len(dataloader)
 
 
-def validate(model, dataloader, criterion, metrics, device):
+@torch.no_grad()
+def validate(model, dataloader, metrics, device):
     model.eval()
-    val_loss = 0
-    all_metrics = {'MAE': 0, 'F-measure': 0, 'S-measure': 0, 'E-measure': 0, 'IoU': 0}
-
-    with torch.no_grad():
-        for images, masks in tqdm(dataloader, desc="Validation"):
-            images, masks = images.to(device), masks.to(device)
-            outputs, aux_loss = model(images)
-            loss, _ = criterion(outputs, masks, aux_loss)
-            val_loss += loss.item()
-
-            batch_metrics = metrics.compute_all(outputs, masks)
-            for key in all_metrics:
-                all_metrics[key] += batch_metrics[key]
-
-    avg_metrics = {k: v / len(dataloader) for k, v in all_metrics.items()}
-    return val_loss / len(dataloader), avg_metrics
+    all_metrics = []
+    for images, masks in tqdm(dataloader, desc="Validation", ncols=100, leave=False):
+        images, masks = images.to(device), masks.to(device)
+        outputs, _ = model(images)
+        batch_metrics = metrics.compute_all(outputs, masks)
+        all_metrics.append(batch_metrics)
+    return {k: sum(d[k] for d in all_metrics) / len(all_metrics) for k in all_metrics[0]}
 
 
 def main(args):
-    # Set device
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device}")
-
-    # Set random seed
     set_seed(args.seed)
 
-    # Load datasets
-    print("Loading datasets...")
+    print("CamoXpert Training with Pretrained EdgeNeXt Backbone")
+    print(f"Device: {device}")
+    print(f"Batch Size: {args.batch_size}")
+    print(f"Total Epochs: {args.epochs}")
+    print(f"Stage 1 (Frozen Backbone): 15 epochs")
+    print(f"Stage 2 (Full Fine-tuning): {args.epochs - 15} epochs")
+
     train_dataset = COD10KDataset(root_dir=args.dataset_path, split='train', img_size=args.img_size, augment=True)
     val_dataset = COD10KDataset(root_dir=args.dataset_path, split='val', img_size=args.img_size, augment=False)
+    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers,
+                              pin_memory=True, drop_last=True)
+    val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers,
+                            pin_memory=True)
 
-    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True,
-                              num_workers=args.num_workers, pin_memory=True)
-    val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False,
-                            num_workers=args.num_workers, pin_memory=True)
+    print(f"\nDatasets: Train={len(train_dataset)}, Val={len(val_dataset)}\n")
 
-    print(f"Train samples: {len(train_dataset)}, Val samples: {len(val_dataset)}")
-
-    # Initialize model
-    print("Initializing model...")
-    model = CamoXpert(in_channels=3, num_classes=1).to(device)
+    model = CamoXpert(in_channels=3, num_classes=1, pretrained=True).to(device)
     total_params, trainable_params = count_parameters(model)
-    print(f"Total Parameters: {total_params:,}")
-    print(f"Trainable Parameters: {trainable_params:,}")
+    print(f"Model: {total_params:,} total, {trainable_params:,} trainable\n")
 
-    # Loss, optimizer, and scheduler
     criterion = CamoXpertLoss()
-    optimizer = AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
-    scheduler = CosineAnnealingWarmRestarts(optimizer, T_0=args.t0, T_mult=args.t_mult)
-
-    # Metrics
     metrics = CODMetrics()
-
-    # Create checkpoint directory
     os.makedirs(args.checkpoint_dir, exist_ok=True)
 
-    # Training loop
     best_iou = 0
-    print(f"\nStarting training for {args.epochs} epochs...")
+    history = []
 
-    for epoch in range(args.epochs):
-        print(f"\nEpoch {epoch + 1}/{args.epochs}")
+    print("STAGE 1: Training Decoder (Frozen Backbone)")
 
-        # Train
+    for param in model.backbone.parameters():
+        param.requires_grad = False
+
+    optimizer = AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=args.lr, weight_decay=args.weight_decay)
+    scheduler = CosineAnnealingLR(optimizer, T_max=15, eta_min=1e-6)
+
+    for epoch in range(15):
+        print(f"\nEpoch {epoch + 1}/15")
         train_loss = train_one_epoch(model, train_loader, criterion, optimizer, device)
-
-        # Validate
-        val_loss, val_metrics = validate(model, val_loader, criterion, metrics, device)
-
-        # Update scheduler
+        val_metrics = validate(model, val_loader, metrics, device)
         scheduler.step()
 
-        # Print metrics
-        print(f"Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}")
-        print(f"Val Metrics - MAE: {val_metrics['MAE']:.4f}, IoU: {val_metrics['IoU']:.4f}, "
-              f"F-measure: {val_metrics['F-measure']:.4f}")
+        print(f"Loss: {train_loss:.4f}")
+        print(
+            f"Val - MAE: {val_metrics['MAE']:.4f} | IoU: {val_metrics['IoU']:.4f} | F1: {val_metrics['F-measure']:.4f} | S: {val_metrics['S-measure']:.4f} | E: {val_metrics['E-measure']:.4f}")
 
-        # Save checkpoint if best model
         if val_metrics['IoU'] > best_iou:
             best_iou = val_metrics['IoU']
-            checkpoint = {
-                'epoch': epoch + 1,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'best_iou': best_iou,
-                'val_metrics': val_metrics
-            }
-            save_checkpoint(checkpoint, args.checkpoint_dir, 'best_model.pth')
-            print(f"New best model saved! IoU: {best_iou:.4f}")
+            torch.save(
+                {'epoch': epoch, 'model_state_dict': model.state_dict(), 'optimizer_state_dict': optimizer.state_dict(),
+                 'best_iou': best_iou, 'val_metrics': val_metrics}, os.path.join(args.checkpoint_dir, 'best_model.pth'))
+            print(f"✓ New best! IoU: {best_iou:.4f}")
 
-        # Save periodic checkpoint
-        if (epoch + 1) % 10 == 0:
-            checkpoint = {
-                'epoch': epoch + 1,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'val_metrics': val_metrics
-            }
-            save_checkpoint(checkpoint, args.checkpoint_dir, f'checkpoint_epoch_{epoch + 1}.pth')
+        history.append({'epoch': epoch, 'train_loss': train_loss, **val_metrics})
 
-    print("\n")
-    print(f"Training completed! Best IoU: {best_iou:.4f}")
+    print(f"\nStage 1 Complete. Best IoU: {best_iou:.4f}\n")
+
+    print("STAGE 2: Full Model Fine-tuning")
+
+    for param in model.parameters():
+        param.requires_grad = True
+
+    optimizer = AdamW([
+        {'params': model.backbone.parameters(), 'lr': args.lr * 0.1},
+        {'params': [p for n, p in model.named_parameters() if 'backbone' not in n], 'lr': args.lr}
+    ], weight_decay=args.weight_decay)
+    scheduler = CosineAnnealingLR(optimizer, T_max=args.epochs - 15, eta_min=1e-6)
+
+    for epoch in range(15, args.epochs):
+        print(f"\nEpoch {epoch + 1}/{args.epochs}")
+        train_loss = train_one_epoch(model, train_loader, criterion, optimizer, device)
+        val_metrics = validate(model, val_loader, metrics, device)
+        scheduler.step()
+
+        print(f"Loss: {train_loss:.4f}")
+        print(
+            f"Val - MAE: {val_metrics['MAE']:.4f} | IoU: {val_metrics['IoU']:.4f} | F1: {val_metrics['F-measure']:.4f} | S: {val_metrics['S-measure']:.4f} | E: {val_metrics['E-measure']:.4f}")
+
+        if val_metrics['IoU'] > best_iou:
+            best_iou = val_metrics['IoU']
+            torch.save(
+                {'epoch': epoch, 'model_state_dict': model.state_dict(), 'optimizer_state_dict': optimizer.state_dict(),
+                 'best_iou': best_iou, 'val_metrics': val_metrics}, os.path.join(args.checkpoint_dir, 'best_model.pth'))
+            print(f"✓ New best! IoU: {best_iou:.4f}")
+
+        history.append({'epoch': epoch, 'train_loss': train_loss, **val_metrics})
+
+    with open(os.path.join(args.checkpoint_dir, 'training_history.json'), 'w') as f:
+        json.dump(history, f, indent=2)
+
+    print(f"Training Complete! Best IoU: {best_iou:.4f}")
 
 
-# Create parser at module level
-parser = argparse.ArgumentParser(description="CamoXpert Training Script")
-parser.add_argument("--dataset-path", type=str, required=True, help="Path to the dataset")
-parser.add_argument("--checkpoint-dir", type=str, default="./checkpoints", help="Directory to save checkpoints")
-parser.add_argument("--batch-size", type=int, default=8, help="Batch size for training")
-parser.add_argument("--img-size", type=int, default=352, help="Image size for training")
-parser.add_argument("--epochs", type=int, default=100, help="Number of training epochs")
-parser.add_argument("--lr", type=float, default=0.0001, help="Learning rate")
-parser.add_argument("--weight-decay", type=float, default=0.00001, help="Weight decay")
-parser.add_argument("--t0", type=int, default=10, help="T_0 for cosine annealing")
-parser.add_argument("--t-mult", type=int, default=2, help="T_mult for cosine annealing")
-parser.add_argument("--seed", type=int, default=42, help="Random seed")
-parser.add_argument("--device", type=str, default="cuda", help="Device to run training on")
-parser.add_argument("--num-workers", type=int, default=4, help="Number of data loading workers")
+parser = argparse.ArgumentParser(description="CamoXpert Training")
+parser.add_argument("--dataset-path", type=str, required=True)
+parser.add_argument("--checkpoint-dir", type=str, default="./checkpoints")
+parser.add_argument("--batch-size", type=int, default=8)
+parser.add_argument("--img-size", type=int, default=352)
+parser.add_argument("--epochs", type=int, default=40)
+parser.add_argument("--lr", type=float, default=0.0001)
+parser.add_argument("--weight-decay", type=float, default=0.01)
+parser.add_argument("--seed", type=int, default=42)
+parser.add_argument("--device", type=str, default="cuda")
+parser.add_argument("--num-workers", type=int, default=2)
+parser.add_argument("--t0", type=int, default=10)
+parser.add_argument("--t-mult", type=int, default=2)
 
 if __name__ == "__main__":
     args = parser.parse_args()
