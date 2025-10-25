@@ -90,17 +90,22 @@ class CamoXpert(nn.Module):
         self.sdta_blocks = nn.ModuleList([SDTABlock(dim) for dim in self.feature_dims])
         self.moe_layers = nn.ModuleList([MoELayer(dim) for dim in self.feature_dims])
 
+        # Decoder with proper channel progression
         decoder_channels = [256, 128, 64, 32]
         self.decoder_blocks = nn.ModuleList()
-        in_ch = self.feature_dims[-1]
-        for out_ch in decoder_channels:
-            self.decoder_blocks.append(DecoderBlock(in_ch, out_ch))
-            in_ch = out_ch
 
-        self.skip_convs = nn.ModuleList([
-            nn.Conv2d(feat_dim, dec_ch, 1)
-            for feat_dim, dec_ch in zip(self.feature_dims[:-1][::-1], decoder_channels[1:])
-        ])
+        # First decoder block from last feature
+        self.decoder_blocks.append(DecoderBlock(self.feature_dims[-1], decoder_channels[0]))
+
+        # Subsequent decoder blocks (with skip connections added)
+        for i in range(1, len(decoder_channels)):
+            # Input = previous decoder output + skip connection from backbone
+            skip_idx = len(self.feature_dims) - 1 - i  # Index for skip features
+            if skip_idx >= 0:
+                in_ch = decoder_channels[i - 1] + self.feature_dims[skip_idx]
+            else:
+                in_ch = decoder_channels[i - 1]
+            self.decoder_blocks.append(DecoderBlock(in_ch, decoder_channels[i]))
 
         self.final_conv = nn.Sequential(
             nn.Conv2d(decoder_channels[-1], 32, 3, padding=1),
@@ -121,15 +126,26 @@ class CamoXpert(nn.Module):
             enhanced_features.append(feat)
             total_aux_loss += aux_loss
 
+        # Start with the last (deepest) feature
         x = enhanced_features[-1]
-        for i, decoder_block in enumerate(self.decoder_blocks):
-            x = decoder_block(x)
-            x = F.interpolate(x, scale_factor=2, mode='bilinear', align_corners=False)
-            if i < len(self.skip_convs):
-                skip = self.skip_convs[i](enhanced_features[-(i + 2)])
+
+        # First decoder block (no skip connection)
+        x = self.decoder_blocks[0](x)
+        x = F.interpolate(x, scale_factor=2, mode='bilinear', align_corners=False)
+
+        # Remaining decoder blocks with skip connections
+        for i in range(1, len(self.decoder_blocks)):
+            skip_idx = len(enhanced_features) - 1 - i
+            if skip_idx >= 0:
+                skip = enhanced_features[skip_idx]
+                # Resize skip to match current resolution
                 if x.shape[2:] != skip.shape[2:]:
                     skip = F.interpolate(skip, size=x.shape[2:], mode='bilinear', align_corners=False)
-                x = x + skip
+                # Concatenate instead of add
+                x = torch.cat([x, skip], dim=1)
+
+            x = self.decoder_blocks[i](x)
+            x = F.interpolate(x, scale_factor=2, mode='bilinear', align_corners=False)
 
         x = self.final_conv(x)
         x = F.interpolate(x, size=input_size, mode='bilinear', align_corners=False)
