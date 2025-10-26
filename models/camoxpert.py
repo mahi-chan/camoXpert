@@ -5,7 +5,7 @@ import timm
 
 
 class MoELayer(nn.Module):
-    def __init__(self, dim, num_experts=3):
+    def __init__(self, dim, num_experts=4):  # Increased to 4 experts
         super().__init__()
         self.num_experts = num_experts
         self.router = nn.Linear(dim, num_experts)
@@ -60,7 +60,7 @@ class SDTABlock(nn.Module):
 
 
 class DecoderBlock(nn.Module):
-    def __init__(self, in_channels, out_channels):
+    def __init__(self, in_channels, out_channels, use_attention=False):
         super().__init__()
         self.conv1 = nn.Conv2d(in_channels, out_channels, 3, padding=1)
         self.bn1 = nn.BatchNorm2d(out_channels)
@@ -68,45 +68,60 @@ class DecoderBlock(nn.Module):
         self.bn2 = nn.BatchNorm2d(out_channels)
         self.relu = nn.ReLU(inplace=True)
 
+        # Add channel attention
+        self.use_attention = use_attention
+        if use_attention:
+            self.channel_attention = nn.Sequential(
+                nn.AdaptiveAvgPool2d(1),
+                nn.Conv2d(out_channels, out_channels // 16, 1),
+                nn.ReLU(inplace=True),
+                nn.Conv2d(out_channels // 16, out_channels, 1),
+                nn.Sigmoid()
+            )
+
     def forward(self, x):
         x = self.relu(self.bn1(self.conv1(x)))
         x = self.relu(self.bn2(self.conv2(x)))
+
+        if self.use_attention:
+            x = x * self.channel_attention(x)
+
         return x
 
 
 class CamoXpert(nn.Module):
-    def __init__(self, in_channels=3, num_classes=1, pretrained=True, depths=None, dims=None):
+    def __init__(self, in_channels=3, num_classes=1, pretrained=True,
+                 backbone='edgenext_base_usi', num_experts=4):
         super().__init__()
 
-        # Create backbone
+        self.backbone_name = backbone
+
+        # Create backbone with edgenext_base_usi
+        print(f"Creating backbone: {backbone}")
         self.backbone = timm.create_model(
-            'edgenext_small',
+            backbone,
             pretrained=pretrained,
             features_only=True,
             out_indices=(0, 1, 2, 3)
         )
 
-        # Get actual feature dimensions from backbone
         self.feature_dims = [f['num_chs'] for f in self.backbone.feature_info]
-        print(f"Backbone feature dims: {self.feature_dims}")
+        print(f"Feature dimensions: {self.feature_dims}")
 
-        # SDTA and MoE for each stage
+        # Enhanced SDTA and MoE layers
         self.sdta_blocks = nn.ModuleList([SDTABlock(dim) for dim in self.feature_dims])
-        self.moe_layers = nn.ModuleList([MoELayer(dim) for dim in self.feature_dims])
+        self.moe_layers = nn.ModuleList([MoELayer(dim, num_experts) for dim in self.feature_dims])
 
-        # Progressive decoder
-        decoder_channels = [256, 128, 64, 32]
+        # Larger decoder for base models
+        decoder_channels = [512, 256, 128, 64]
         self.decoder_blocks = nn.ModuleList()
 
-        # First block: from deepest feature to decoder_channels[0]
+        # First decoder block
         self.decoder_blocks.append(
-            DecoderBlock(self.feature_dims[-1], decoder_channels[0])
+            DecoderBlock(self.feature_dims[-1], decoder_channels[0], use_attention=True)
         )
 
-        # Subsequent blocks with skip connections
-        # Block 1: decoder[0] output (256) + feature[2] -> 128
-        # Block 2: decoder[1] output (128) + feature[1] -> 64
-        # Block 3: decoder[2] output (64) + feature[0] -> 32
+        # Subsequent decoder blocks with skip connections
         for i in range(1, len(decoder_channels)):
             skip_idx = len(self.feature_dims) - 1 - i
             if skip_idx >= 0:
@@ -115,19 +130,27 @@ class CamoXpert(nn.Module):
                 in_channels = decoder_channels[i - 1]
 
             self.decoder_blocks.append(
-                DecoderBlock(in_channels, decoder_channels[i])
+                DecoderBlock(in_channels, decoder_channels[i], use_attention=True)
             )
-            print(f"Decoder block {i}: {in_channels} -> {decoder_channels[i]}")
 
-        # Final prediction head
+        # Enhanced final conv with deep supervision
         self.final_conv = nn.Sequential(
-            nn.Conv2d(decoder_channels[-1], 32, 3, padding=1),
+            nn.Conv2d(decoder_channels[-1], 64, 3, padding=1),
+            nn.BatchNorm2d(64),
+            nn.ReLU(inplace=True),
+            nn.Conv2d(64, 32, 3, padding=1),
             nn.BatchNorm2d(32),
             nn.ReLU(inplace=True),
             nn.Conv2d(32, num_classes, 1)
         )
 
-    def forward(self, x):
+        # Deep supervision heads for intermediate outputs
+        self.deep_supervision = nn.ModuleList([
+            nn.Conv2d(decoder_channels[i], num_classes, 1)
+            for i in range(len(decoder_channels))
+        ])
+
+    def forward(self, x, return_deep_supervision=False):
         input_size = x.shape[2:]
 
         # Extract multi-scale features
@@ -143,36 +166,38 @@ class CamoXpert(nn.Module):
             total_aux_loss += aux_loss
 
         # Decode with skip connections
-        x = enhanced_features[-1]  # Start with deepest features
-
-        # First decoder block (no skip)
+        x = enhanced_features[-1]
         x = self.decoder_blocks[0](x)
         x = F.interpolate(x, scale_factor=2, mode='bilinear', align_corners=False)
 
-        # Remaining blocks with skip connections
+        deep_outputs = []
+
         for i in range(1, len(self.decoder_blocks)):
-            # Get corresponding skip connection
             skip_idx = len(enhanced_features) - 1 - i
 
-            if skip_idx >= 0 and skip_idx < len(enhanced_features):
+            if 0 <= skip_idx < len(enhanced_features):
                 skip = enhanced_features[skip_idx]
-
-                # Match spatial dimensions
                 if x.shape[2:] != skip.shape[2:]:
                     skip = F.interpolate(skip, size=x.shape[2:], mode='bilinear', align_corners=False)
-
-                # Concatenate skip connection
                 x = torch.cat([x, skip], dim=1)
 
-            # Apply decoder block
             x = self.decoder_blocks[i](x)
 
-            # Upsample (except for last block)
+            # Deep supervision
+            if return_deep_supervision and i < len(self.deep_supervision):
+                deep_out = self.deep_supervision[i](x)
+                deep_out = F.interpolate(deep_out, size=input_size, mode='bilinear', align_corners=False)
+                deep_outputs.append(torch.sigmoid(deep_out))
+
             if i < len(self.decoder_blocks) - 1:
                 x = F.interpolate(x, scale_factor=2, mode='bilinear', align_corners=False)
 
         # Final prediction
         x = self.final_conv(x)
         x = F.interpolate(x, size=input_size, mode='bilinear', align_corners=False)
+        final_output = torch.sigmoid(x)
 
-        return torch.sigmoid(x), total_aux_loss
+        if return_deep_supervision:
+            return final_output, total_aux_loss, deep_outputs
+
+        return final_output, total_aux_loss
