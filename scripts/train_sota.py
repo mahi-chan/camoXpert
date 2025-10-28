@@ -210,7 +210,7 @@ def main():
         num_classes=1,
         pretrained=True,  # Uses ImageNet pretrained weights
         backbone=config['backbone'],
-        num_experts=4
+        num_experts=7
     ).to(device)
 
     total, trainable = count_parameters(model)

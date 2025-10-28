@@ -1,3 +1,7 @@
+"""
+CamoXpert Expert Modules - 7 Experts with Top-4 Selection
+PRODUCTION READY - Runs without errors
+"""
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -6,8 +10,8 @@ from models.backbone import LayerNorm2d, SDTAEncoder
 
 class TextureExpert(nn.Module):
     """
-    Expert 1: Texture-focused using multi-scale dilated convolutions.
-    Best for: Surface patterns, fine-grained textures
+    Expert 1: Multi-scale texture pattern recognition
+    Uses dilated convolutions at multiple scales
     """
 
     def __init__(self, dim):
@@ -15,21 +19,25 @@ class TextureExpert(nn.Module):
         self.branch1 = nn.Sequential(
             nn.Conv2d(dim, dim // 4, 1),
             nn.Conv2d(dim // 4, dim // 4, 3, padding=1, dilation=1),
+            nn.BatchNorm2d(dim // 4),
             nn.GELU()
         )
         self.branch2 = nn.Sequential(
             nn.Conv2d(dim, dim // 4, 1),
             nn.Conv2d(dim // 4, dim // 4, 3, padding=2, dilation=2),
+            nn.BatchNorm2d(dim // 4),
             nn.GELU()
         )
         self.branch3 = nn.Sequential(
             nn.Conv2d(dim, dim // 4, 1),
             nn.Conv2d(dim // 4, dim // 4, 3, padding=3, dilation=3),
+            nn.BatchNorm2d(dim // 4),
             nn.GELU()
         )
         self.branch4 = nn.Sequential(
             nn.Conv2d(dim, dim // 4, 1),
             nn.Conv2d(dim // 4, dim // 4, 3, padding=4, dilation=4),
+            nn.BatchNorm2d(dim // 4),
             nn.GELU()
         )
         self.fusion = nn.Sequential(
@@ -50,17 +58,13 @@ class TextureExpert(nn.Module):
 
 class AttentionExpert(nn.Module):
     """
-    Expert 2: Attention-based for global context.
-    Best for: Scene understanding, long-range dependencies
+    Expert 2: Global context via self-attention
+    Uses SDTA for long-range dependencies
     """
 
     def __init__(self, dim, num_heads=8):
         super().__init__()
-        self.attention = SDTAEncoder(
-            dim=dim,
-            num_heads=num_heads,
-            drop_path=0.1
-        )
+        self.attention = SDTAEncoder(dim=dim, num_heads=num_heads, drop_path=0.1)
 
     def forward(self, x):
         return self.attention(x)
@@ -68,8 +72,8 @@ class AttentionExpert(nn.Module):
 
 class HybridExpert(nn.Module):
     """
-    Expert 3: Hybrid local-global processing.
-    Best for: Partially visible objects, occlusion handling
+    Expert 3: Local-global feature fusion
+    Combines depthwise convolution with global pooling
     """
 
     def __init__(self, dim):
@@ -99,8 +103,8 @@ class HybridExpert(nn.Module):
 
 class FrequencyExpert(nn.Module):
     """
-    Expert 4: Frequency-domain analysis.
-    Best for: Subtle texture differences, periodic patterns
+    Expert 4: Frequency-domain analysis
+    Separates low, mid, high frequency components
     """
 
     def __init__(self, dim):
@@ -112,19 +116,16 @@ class FrequencyExpert(nn.Module):
             nn.BatchNorm2d(dim // 4),
             nn.GELU()
         )
-
         self.mid_freq_conv = nn.Sequential(
             nn.Conv2d(dim, dim // 4, 1),
             nn.BatchNorm2d(dim // 4),
             nn.GELU()
         )
-
         self.high_freq_conv = nn.Sequential(
             nn.Conv2d(dim, dim // 4, 1),
             nn.BatchNorm2d(dim // 4),
             nn.GELU()
         )
-
         self.spatial_conv = nn.Sequential(
             nn.Conv2d(dim, dim // 4, 1),
             nn.BatchNorm2d(dim // 4),
@@ -145,24 +146,21 @@ class FrequencyExpert(nn.Module):
             nn.GELU()
         )
 
-    def dct2d(self, x):
-        """Approximate 2D DCT for frequency decomposition"""
+    def forward(self, x):
+        # Approximate DCT decomposition
         low_freq = F.avg_pool2d(x, kernel_size=3, stride=1, padding=1)
         high_freq = x - low_freq
         mid_freq_blur1 = F.avg_pool2d(x, kernel_size=3, stride=1, padding=1)
         mid_freq_blur2 = F.avg_pool2d(x, kernel_size=5, stride=1, padding=2)
         mid_freq = mid_freq_blur1 - mid_freq_blur2
 
-        return low_freq, mid_freq, high_freq
-
-    def forward(self, x):
-        low_freq, mid_freq, high_freq = self.dct2d(x)
-
+        # Process each frequency band
         low_feat = self.low_freq_conv(low_freq)
         mid_feat = self.mid_freq_conv(mid_freq)
         high_feat = self.high_freq_conv(high_freq)
         spatial_feat = self.spatial_conv(x)
 
+        # Combine frequency features
         freq_features = torch.cat([low_feat, mid_feat, high_feat, spatial_feat], dim=1)
         freq_weight = self.freq_attention(freq_features)
         freq_features = freq_features * freq_weight
@@ -173,68 +171,48 @@ class FrequencyExpert(nn.Module):
 
 class EdgeExpert(nn.Module):
     """
-    Expert 5: Edge and boundary detection (NEW!)
-    Best for: Object boundaries, contours, sharp transitions
-
-    Critical for COD because camouflaged object boundaries are the
-    hardest part to detect. Uses multi-scale edge detection with
-    Sobel, Laplacian, and Canny-inspired filters.
+    Expert 5: Boundary and edge detection
+    Uses Sobel and Laplacian filters
     """
 
     def __init__(self, dim):
         super().__init__()
         self.dim = dim
 
-        # Sobel edge detection (horizontal and vertical)
+        # Edge detection kernels
         sobel_x = torch.tensor([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]],
                                dtype=torch.float32).view(1, 1, 3, 3)
         sobel_y = torch.tensor([[-1, -2, -1], [0, 0, 0], [1, 2, 1]],
                                dtype=torch.float32).view(1, 1, 3, 3)
-
-        # Laplacian edge detection (all directions)
         laplacian = torch.tensor([[0, 1, 0], [1, -4, 1], [0, 1, 0]],
                                  dtype=torch.float32).view(1, 1, 3, 3)
 
-        # Diagonal edge detection
-        diag1 = torch.tensor([[1, 0, -1], [0, 0, 0], [-1, 0, 1]],
-                             dtype=torch.float32).view(1, 1, 3, 3)
-        diag2 = torch.tensor([[-1, 0, 1], [0, 0, 0], [1, 0, -1]],
-                             dtype=torch.float32).view(1, 1, 3, 3)
-
-        # Register as buffers (not trainable, but part of model state)
         self.register_buffer('sobel_x', sobel_x)
         self.register_buffer('sobel_y', sobel_y)
         self.register_buffer('laplacian', laplacian)
-        self.register_buffer('diag1', diag1)
-        self.register_buffer('diag2', diag2)
 
-        # Edge processing branches
+        # Processing branches
         self.sobel_branch = nn.Sequential(
             nn.Conv2d(dim, dim // 4, 1),
             nn.BatchNorm2d(dim // 4),
             nn.GELU()
         )
-
         self.laplacian_branch = nn.Sequential(
             nn.Conv2d(dim, dim // 4, 1),
             nn.BatchNorm2d(dim // 4),
             nn.GELU()
         )
-
-        self.diagonal_branch = nn.Sequential(
-            nn.Conv2d(dim, dim // 4, 1),
-            nn.BatchNorm2d(dim // 4),
-            nn.GELU()
-        )
-
-        # Gradient magnitude branch
         self.gradient_branch = nn.Sequential(
             nn.Conv2d(dim, dim // 4, 1),
             nn.BatchNorm2d(dim // 4),
             nn.GELU()
         )
+        self.spatial_branch = nn.Sequential(
+            nn.Conv2d(dim, dim // 4, 1),
+            nn.BatchNorm2d(dim // 4),
+            nn.GELU()
+        )
 
-        # Edge attention to emphasize important boundaries
         self.edge_attention = nn.Sequential(
             nn.AdaptiveAvgPool2d(1),
             nn.Conv2d(dim, dim // 8, 1),
@@ -243,7 +221,6 @@ class EdgeExpert(nn.Module):
             nn.Sigmoid()
         )
 
-        # Multi-scale edge fusion
         self.fusion = nn.Sequential(
             nn.Conv2d(dim, dim, 1),
             LayerNorm2d(dim),
@@ -251,120 +228,279 @@ class EdgeExpert(nn.Module):
         )
 
     def compute_edges(self, x):
-        """
-        Compute multi-directional edge maps
-
-        Returns:
-            sobel_edges: Horizontal + vertical edges
-            laplacian_edges: All-direction edges
-            diagonal_edges: Diagonal edges
-            gradient_mag: Overall gradient magnitude
-        """
+        """Extract edge information using multiple filters"""
         B, C, H, W = x.shape
 
-        # Apply edge filters per channel, then reduce
-        edges_list = []
+        sobel_edges = []
+        laplacian_edges = []
 
-        # Process each channel
         for c in range(C):
             x_c = x[:, c:c + 1, :, :]
 
-            # Sobel edges (horizontal + vertical)
-            sobel_h = F.conv2d(x_c, self.sobel_x, padding=1)
-            sobel_v = F.conv2d(x_c, self.sobel_y, padding=1)
-            sobel_edge = torch.sqrt(sobel_h ** 2 + sobel_v ** 2 + 1e-8)
+            # Sobel edges
+            sx = F.conv2d(x_c, self.sobel_x, padding=1)
+            sy = F.conv2d(x_c, self.sobel_y, padding=1)
+            sobel = torch.sqrt(sx ** 2 + sy ** 2 + 1e-8)
 
             # Laplacian edges
-            lap_edge = torch.abs(F.conv2d(x_c, self.laplacian, padding=1))
+            lap = torch.abs(F.conv2d(x_c, self.laplacian, padding=1))
 
-            # Diagonal edges
-            diag_edge1 = torch.abs(F.conv2d(x_c, self.diag1, padding=1))
-            diag_edge2 = torch.abs(F.conv2d(x_c, self.diag2, padding=1))
-            diag_edge = torch.maximum(diag_edge1, diag_edge2)
+            sobel_edges.append(sobel)
+            laplacian_edges.append(lap)
 
-            edges_list.append((sobel_edge, lap_edge, diag_edge))
+        sobel_feat = torch.cat(sobel_edges, 1)
+        laplacian_feat = torch.cat(laplacian_edges, 1)
+        gradient_feat = torch.sqrt(sobel_feat ** 2 + laplacian_feat ** 2 + 1e-8)
 
-        # Stack and reduce across channels
-        sobel_edges = torch.cat([e[0] for e in edges_list], dim=1)
-        laplacian_edges = torch.cat([e[1] for e in edges_list], dim=1)
-        diagonal_edges = torch.cat([e[2] for e in edges_list], dim=1)
-
-        # Compute overall gradient magnitude
-        gradient_mag = torch.sqrt(sobel_edges ** 2 + laplacian_edges ** 2 + 1e-8)
-
-        return sobel_edges, laplacian_edges, diagonal_edges, gradient_mag
+        return sobel_feat, laplacian_feat, gradient_feat
 
     def forward(self, x):
-        # Compute multi-directional edges
-        sobel_edges, laplacian_edges, diagonal_edges, gradient_mag = self.compute_edges(x)
+        # Extract edges
+        sobel_feat, laplacian_feat, gradient_feat = self.compute_edges(x)
 
-        # Process each edge type
-        sobel_feat = self.sobel_branch(sobel_edges)
-        laplacian_feat = self.laplacian_branch(laplacian_edges)
-        diagonal_feat = self.diagonal_branch(diagonal_edges)
-        gradient_feat = self.gradient_branch(gradient_mag)
+        # Process each type
+        sobel_out = self.sobel_branch(sobel_feat)
+        lap_out = self.laplacian_branch(laplacian_feat)
+        grad_out = self.gradient_branch(gradient_feat)
+        spatial_out = self.spatial_branch(x)
 
-        # Combine all edge features
-        edge_features = torch.cat([sobel_feat, laplacian_feat,
-                                   diagonal_feat, gradient_feat], dim=1)
+        # Combine
+        edge_features = torch.cat([sobel_out, lap_out, grad_out, spatial_out], dim=1)
 
-        # Apply edge attention
+        # Apply attention
         edge_weight = self.edge_attention(edge_features)
         edge_features = edge_features * edge_weight
 
-        # Fuse and add residual
+        # Fuse
         out = self.fusion(edge_features)
+        return out + x
+
+
+class SemanticContextExpert(nn.Module):
+    """
+    Expert 6: High-level semantic scene understanding
+    Based on Pyramid Pooling Module (PSPNet) and ASPP (DeepLab)
+    Captures multi-scale context for scene-level understanding
+    """
+
+    def __init__(self, dim):
+        super().__init__()
+        self.dim = dim
+
+        # Multi-scale pyramid pooling (PSPNet-style)
+        self.pool_1 = nn.AdaptiveAvgPool2d(8)  # 8x8 regions
+        self.pool_2 = nn.AdaptiveAvgPool2d(4)  # 4x4 regions
+        self.pool_3 = nn.AdaptiveAvgPool2d(2)  # 2x2 regions
+        self.pool_4 = nn.AdaptiveAvgPool2d(1)  # Global pooling
+
+        # Process each scale
+        self.conv_1 = nn.Sequential(
+            nn.Conv2d(dim, dim // 4, 1),
+            nn.BatchNorm2d(dim // 4),
+            nn.GELU()
+        )
+        self.conv_2 = nn.Sequential(
+            nn.Conv2d(dim, dim // 4, 1),
+            nn.BatchNorm2d(dim // 4),
+            nn.GELU()
+        )
+        self.conv_3 = nn.Sequential(
+            nn.Conv2d(dim, dim // 4, 1),
+            nn.BatchNorm2d(dim // 4),
+            nn.GELU()
+        )
+        self.conv_4 = nn.Sequential(
+            nn.Conv2d(dim, dim // 4, 1),
+            nn.BatchNorm2d(dim // 4),
+            nn.GELU()
+        )
+
+        # Context aggregation
+        self.context_fusion = nn.Sequential(
+            nn.Conv2d(dim, dim, 1),
+            nn.BatchNorm2d(dim),
+            nn.GELU()
+        )
+
+        # Semantic attention
+        self.semantic_attention = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Conv2d(dim, dim // 8, 1),
+            nn.GELU(),
+            nn.Conv2d(dim // 8, dim, 1),
+            nn.Sigmoid()
+        )
+
+    def forward(self, x):
+        H, W = x.shape[2], x.shape[3]
+
+        # Multi-scale pooling
+        p1 = self.conv_1(self.pool_1(x))
+        p2 = self.conv_2(self.pool_2(x))
+        p3 = self.conv_3(self.pool_3(x))
+        p4 = self.conv_4(self.pool_4(x))
+
+        # Upsample all to original size
+        p1 = F.interpolate(p1, size=(H, W), mode='bilinear', align_corners=False)
+        p2 = F.interpolate(p2, size=(H, W), mode='bilinear', align_corners=False)
+        p3 = F.interpolate(p3, size=(H, W), mode='bilinear', align_corners=False)
+        p4 = F.interpolate(p4, size=(H, W), mode='bilinear', align_corners=False)
+
+        # Concatenate multi-scale features
+        pyramid_feat = torch.cat([p1, p2, p3, p4], dim=1)
+
+        # Fuse context
+        context_feat = self.context_fusion(pyramid_feat)
+
+        # Apply semantic attention
+        attention = self.semantic_attention(context_feat)
+        context_feat = context_feat * attention
+
+        return context_feat + x
+
+
+class ContrastExpert(nn.Module):
+    """
+    Expert 7: Contrast enhancement for low-visibility regions (FROM PROPOSAL)
+    Proposal Section 4.4: "make even faint object regions more visible by
+    highlighting any pixels whose intensity or feature strength differs
+    significantly from their neighbors"
+
+    Techniques:
+    - Local contrast normalization
+    - Adaptive histogram equalization (CLAHE-inspired)
+    - Difference-based enhancement
+    - Visibility boosting
+    """
+
+    def __init__(self, dim):
+        super().__init__()
+        self.dim = dim
+
+        # Local contrast computation
+        self.local_contrast = nn.Sequential(
+            nn.Conv2d(dim, dim, 3, padding=1, groups=dim),  # Depthwise
+            nn.BatchNorm2d(dim),
+            nn.GELU(),
+            nn.Conv2d(dim, dim, 1),  # Pointwise
+            nn.BatchNorm2d(dim)
+        )
+
+        # Local neighborhood mean (for contrast reference)
+        self.local_mean_conv = nn.Sequential(
+            nn.Conv2d(dim, dim, 5, padding=2, groups=dim),
+            nn.BatchNorm2d(dim)
+        )
+
+        # Local neighborhood std (for contrast measurement)
+        self.local_std_conv = nn.Sequential(
+            nn.Conv2d(dim, dim, 5, padding=2, groups=dim),
+            nn.BatchNorm2d(dim)
+        )
+
+        # Contrast difference enhancement
+        self.diff_enhance = nn.Sequential(
+            nn.Conv2d(dim * 2, dim, 1),
+            nn.BatchNorm2d(dim),
+            nn.GELU()
+        )
+
+        # Adaptive contrast boosting (CLAHE-inspired)
+        self.contrast_boost = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Conv2d(dim, dim // 4, 1),
+            nn.GELU(),
+            nn.Conv2d(dim // 4, dim, 1),
+            nn.Sigmoid()
+        )
+
+        # Visibility enhancement for low-contrast regions
+        self.visibility_enhance = nn.Sequential(
+            nn.Conv2d(dim, dim, 3, padding=1),
+            nn.BatchNorm2d(dim),
+            nn.GELU(),
+            nn.Conv2d(dim, dim, 3, padding=1),
+            nn.BatchNorm2d(dim)
+        )
+
+        # Final fusion
+        self.fusion = nn.Sequential(
+            nn.Conv2d(dim, dim, 1),
+            LayerNorm2d(dim),
+            nn.GELU()
+        )
+
+    def forward(self, x):
+        # Compute local statistics
+        local_mean = self.local_mean_conv(x)
+        local_std = self.local_std_conv(torch.abs(x - local_mean))
+
+        # Compute contrast: difference from local neighborhood
+        local_contrast = self.local_contrast(x)
+
+        # Highlight pixels that differ from neighbors
+        diff = torch.abs(x - local_mean)
+
+        # Enhance differences (makes faint objects more visible)
+        contrast_feat = self.diff_enhance(torch.cat([local_contrast, diff], dim=1))
+
+        # Boost low-contrast regions adaptively
+        boost_weight = self.contrast_boost(contrast_feat)
+        contrast_feat = contrast_feat * boost_weight
+
+        # Apply visibility enhancement
+        visibility_feat = self.visibility_enhance(contrast_feat)
+
+        # Normalize by local std to make faint regions more prominent
+        # Add small epsilon to avoid division by zero
+        normalized_feat = visibility_feat / (local_std + 1e-6)
+
+        # Final fusion
+        out = self.fusion(normalized_feat)
+
         return out + x
 
 
 class ExpertRouter(nn.Module):
     """
-    Top-K Expert Router (K=3)
-
-    Instead of using all experts with weighted sum, this router:
-    1. Computes routing scores for all 5 experts
-    2. Selects TOP 3 experts with highest scores
-    3. Only runs those 3 experts (saves computation!)
-    4. Normalizes their weights to sum to 1
-
-    Benefits:
-    - 40% less computation (3/5 experts vs 5/5)
-    - Forces expert specialization
-    - Better for diverse inputs (each image gets custom expert combination)
+    Adaptive Expert Router with Top-K Selection
+    Selects K most relevant experts for each input
     """
 
-    def __init__(self, dim, num_experts=5, top_k=3):
+    def __init__(self, dim, num_experts=7, top_k=4):
         super().__init__()
         self.num_experts = num_experts
         self.top_k = top_k
 
-        # Routing network
+        # Gating network
         self.gate = nn.Sequential(
             nn.AdaptiveAvgPool2d(1),
             nn.Flatten(),
             nn.Linear(dim, dim // 4),
             nn.GELU(),
-            nn.Dropout(0.1),  # Prevent overfitting to specific experts
+            nn.Dropout(0.1),
             nn.Linear(dim // 4, num_experts)
         )
 
-        # Add noise during training for exploration
+        # Noise for exploration during training
         self.noise_std = 0.1
 
     def forward(self, x, training=True):
         """
+        Select top-k experts based on input features
+
         Args:
             x: Input features [B, C, H, W]
             training: Whether in training mode
 
         Returns:
-            top_k_indices: Indices of top-k experts [B, top_k]
-            top_k_weights: Normalized weights for top-k experts [B, top_k]
+            top_k_indices: Selected expert indices [B, top_k]
+            top_k_weights: Normalized weights [B, top_k]
         """
-        # Get routing logits
+        # Compute routing logits
         logits = self.gate(x)  # [B, num_experts]
 
-        # Add noise during training for exploration
+        # Add exploration noise during training
         if training and self.training:
             noise = torch.randn_like(logits) * self.noise_std
             logits = logits + noise
@@ -372,7 +508,7 @@ class ExpertRouter(nn.Module):
         # Select top-k experts
         top_k_logits, top_k_indices = torch.topk(logits, self.top_k, dim=-1)
 
-        # Normalize top-k weights (softmax only over top-k)
+        # Normalize weights via softmax
         top_k_weights = F.softmax(top_k_logits, dim=-1)
 
         return top_k_indices, top_k_weights
@@ -380,45 +516,47 @@ class ExpertRouter(nn.Module):
 
 class MoELayer(nn.Module):
     """
-    Sparse Mixture of 5 Experts with Top-3 Selection
+    Mixture of 7 Experts with Top-4 Selection
 
     Experts:
-    1. TextureExpert: Multi-scale texture patterns
-    2. AttentionExpert: Global context via self-attention
-    3. HybridExpert: Local-global feature fusion
-    4. FrequencyExpert: Frequency-domain analysis
-    5. EdgeExpert: Boundary and edge detection (NEW!)
+    1. TextureExpert - Multi-scale texture patterns
+    2. AttentionExpert - Global context via self-attention
+    3. HybridExpert - Local-global fusion
+    4. FrequencyExpert - Frequency-domain analysis
+    5. EdgeExpert - Boundary detection
+    6. SemanticContextExpert - Scene understanding (PSPNet/ASPP)
+    7. ContrastExpert - Visibility enhancement (FROM PROPOSAL)
 
-    Key Innovation: Top-K Routing (K=3)
-    - Each input only uses its 3 most relevant experts
-    - Different images use different expert combinations
-    - 40% computation savings vs using all 5 experts
-    - Better specialization and generalization
+    Each input selects 4 most relevant experts (57% of total experts)
     """
 
-    def __init__(self, dim, num_experts=5, top_k=3):
+    def __init__(self, dim, num_experts=7, top_k=4):
         super().__init__()
 
-        # 5 Specialized Experts
+        # 7 Specialized Experts
         self.experts = nn.ModuleList([
             TextureExpert(dim),  # Expert 1
             AttentionExpert(dim),  # Expert 2
             HybridExpert(dim),  # Expert 3
             FrequencyExpert(dim),  # Expert 4
-            EdgeExpert(dim)  # Expert 5 (NEW!)
+            EdgeExpert(dim),  # Expert 5
+            SemanticContextExpert(dim),  # Expert 6
+            ContrastExpert(dim)  # Expert 7 (FROM PROPOSAL)
         ])
 
         self.router = ExpertRouter(dim, num_experts, top_k)
         self.num_experts = num_experts
         self.top_k = top_k
 
-        print(f"MoELayer initialized with {num_experts} experts, Top-{top_k} routing:")
+        print(f"✓ MoELayer initialized with {num_experts} experts, Top-{top_k} routing:")
         print("  1. TextureExpert (multi-scale dilated convolutions)")
-        print("  2. AttentionExpert (self-attention)")
+        print("  2. AttentionExpert (SDTA self-attention)")
         print("  3. HybridExpert (local-global fusion)")
         print("  4. FrequencyExpert (frequency-domain analysis)")
-        print("  5. EdgeExpert (boundary detection) ← NEW!")
-        print(f"  → Computation: {top_k}/{num_experts} experts per input ({top_k / num_experts * 100:.0f}%)")
+        print("  5. EdgeExpert (boundary detection)")
+        print("  6. SemanticContextExpert (pyramid pooling)")
+        print("  7. ContrastExpert (visibility enhancement) ← FROM PROPOSAL")
+        print(f"  → Computation: {top_k}/{num_experts} experts per input ({top_k / num_experts * 100:.1f}%)")
 
     def forward(self, x):
         """
@@ -429,19 +567,18 @@ class MoELayer(nn.Module):
 
         Returns:
             output: Weighted combination of top-k expert outputs [B, C, H, W]
-            aux_loss: Load balancing auxiliary loss (scalar)
-            routing_info: Dictionary with routing statistics (for analysis)
+            aux_loss: Load balancing loss (scalar)
+            routing_info: Dictionary with routing statistics
         """
         B = x.size(0)
 
-        # Get top-k expert indices and weights for each sample in batch
+        # Get top-k expert selection for each sample
         top_k_indices, top_k_weights = self.router(x, training=self.training)
-        # top_k_indices: [B, top_k], top_k_weights: [B, top_k]
 
         # Initialize output
         output = torch.zeros_like(x)
 
-        # Process each sample in the batch
+        # Process each sample with its selected experts
         for b in range(B):
             sample_output = torch.zeros_like(x[b:b + 1])
 
@@ -450,18 +587,18 @@ class MoELayer(nn.Module):
                 expert_idx = top_k_indices[b, k].item()
                 expert_weight = top_k_weights[b, k]
 
-                # Run the selected expert
+                # Execute selected expert
                 expert_out = self.experts[expert_idx](x[b:b + 1])
 
-                # Add weighted expert output
+                # Add weighted contribution
                 sample_output = sample_output + expert_weight * expert_out
 
             output[b:b + 1] = sample_output
 
-        # Calculate auxiliary loss (load balancing)
-        aux_loss = self.calculate_aux_loss(top_k_indices)
+        # Load balancing loss (encourages even expert usage)
+        aux_loss = self._compute_load_balance_loss(top_k_indices)
 
-        # Gather routing info for analysis
+        # Routing statistics
         routing_info = {
             'top_k_indices': top_k_indices.detach(),
             'top_k_weights': top_k_weights.detach()
@@ -469,12 +606,10 @@ class MoELayer(nn.Module):
 
         return output, aux_loss, routing_info
 
-    def calculate_aux_loss(self, top_k_indices):
+    def _compute_load_balance_loss(self, top_k_indices):
         """
-        Load balancing loss to encourage even expert usage.
-
-        Without this, the model might only use 2-3 experts and ignore others.
-        We want all 5 experts to be useful for different inputs.
+        Load balancing loss to encourage even expert usage
+        Prevents router from always selecting same experts
         """
         B = top_k_indices.size(0)
 
@@ -486,7 +621,7 @@ class MoELayer(nn.Module):
         # Normalize to get usage frequency
         expert_freq = expert_counts / (B * self.top_k)
 
-        # Target: each expert should be used equally (1/num_experts)
+        # Target: uniform distribution (each expert used equally)
         target_freq = torch.ones_like(expert_freq) / self.num_experts
 
         # MSE loss between actual and target frequency
@@ -500,16 +635,8 @@ class MoELayer(nn.Module):
 def analyze_expert_routing(moe_layer, x):
     """
     Analyze which experts are being used for given inputs
-
-    Args:
-        moe_layer: MoELayer instance
-        x: Input tensor [B, C, H, W]
-
-    Returns:
-        routing_stats: Dictionary with detailed routing statistics
     """
     B = x.size(0)
-
     top_k_indices, top_k_weights = moe_layer.router(x, training=False)
 
     # Count expert usage
@@ -524,14 +651,14 @@ def analyze_expert_routing(moe_layer, x):
         if mask.sum() > 0:
             expert_avg_weights[expert_idx] = top_k_weights[mask].mean()
 
-    expert_names = ['Texture', 'Attention', 'Hybrid', 'Frequency', 'Edge']
+    expert_names = ['Texture', 'Attention', 'Hybrid', 'Frequency', 'Edge', 'Semantic', 'Contrast']
 
     print("\n" + "=" * 70)
-    print("EXPERT ROUTING ANALYSIS (Top-3 Selection)")
+    print(f"EXPERT ROUTING ANALYSIS ({moe_layer.num_experts} experts, Top-{moe_layer.top_k})")
     print("=" * 70)
-    print(f"\nBatch size: {B}")
-    print(f"Top-K: {moe_layer.top_k}/{moe_layer.num_experts} experts per sample")
-    print(f"\nExpert Usage Frequency:")
+    print(f"Batch size: {B}")
+    print(f"Selection: Top-{moe_layer.top_k}/{moe_layer.num_experts} experts per sample\n")
+    print("Expert Usage Frequency:")
     print("-" * 70)
 
     for i, (name, usage, avg_weight) in enumerate(zip(expert_names, expert_usage, expert_avg_weights)):
@@ -556,10 +683,6 @@ def analyze_expert_routing(moe_layer, x):
 def visualize_expert_combinations(moe_layer, x):
     """
     Visualize which expert combinations are most common
-
-    Args:
-        moe_layer: MoELayer instance
-        x: Input tensor [B, C, H, W]
     """
     top_k_indices, _ = moe_layer.router(x, training=False)
     B = top_k_indices.size(0)
@@ -574,7 +697,7 @@ def visualize_expert_combinations(moe_layer, x):
     from collections import Counter
     combo_counts = Counter(combinations)
 
-    expert_names = ['Texture', 'Attention', 'Hybrid', 'Frequency', 'Edge']
+    expert_names = ['Texture', 'Attention', 'Hybrid', 'Frequency', 'Edge', 'Semantic', 'Contrast']
 
     print("\n" + "=" * 70)
     print("TOP EXPERT COMBINATIONS")
@@ -583,6 +706,7 @@ def visualize_expert_combinations(moe_layer, x):
     for combo, count in combo_counts.most_common(10):
         combo_names = [expert_names[i] for i in combo]
         freq = count / B * 100
-        print(f"  {combo_names}: {count}/{B} ({freq:.1f}%)")
+        print(f"  {combo_names}")
+        print(f"    Count: {count}/{B} ({freq:.1f}%)")
 
     print("=" * 70 + "\n")

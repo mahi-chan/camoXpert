@@ -24,13 +24,19 @@ def train_one_epoch(model, dataloader, criterion, optimizer, device):
     epoch_loss = 0
     for images, masks in tqdm(dataloader, desc="Training", ncols=100):
         images, masks = images.to(device), masks.to(device)
-        outputs, aux_loss = model(images)
+
+        # Forward pass
+        outputs, aux_loss, _ = model(images)  # Don't use deep supervision in basic training
         loss, _ = criterion(outputs, masks, aux_loss)
+
+        # Backward pass
         optimizer.zero_grad()
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
+
         epoch_loss += loss.item()
+
     return epoch_loss / len(dataloader)
 
 
@@ -38,11 +44,13 @@ def train_one_epoch(model, dataloader, criterion, optimizer, device):
 def validate(model, dataloader, metrics, device):
     model.eval()
     all_metrics = []
+
     for images, masks in tqdm(dataloader, desc="Validation", ncols=100, leave=False):
         images, masks = images.to(device), masks.to(device)
-        outputs, _ = model(images)
+        outputs, _, _ = model(images)
         batch_metrics = metrics.compute_all(outputs, masks)
         all_metrics.append(batch_metrics)
+
     return {k: sum(d[k] for d in all_metrics) / len(all_metrics) for k in all_metrics[0]}
 
 
@@ -67,7 +75,7 @@ def main(args):
     set_seed(args.seed)
 
     print("\n" + "=" * 70)
-    print("CamoXpert Training with Pretrained EdgeNeXt Backbone")
+    print("CamoXpert Training with 7 Experts (Top-4 Selection)")
     print("=" * 70)
     print(f"Device: {device}")
     print(f"Batch Size: {args.batch_size}")
@@ -76,16 +84,23 @@ def main(args):
     print(f"Stage 2 (Full Fine-tuning): {args.epochs - 15} epochs")
     print("=" * 70 + "\n")
 
-    train_dataset = COD10KDataset(root_dir=args.dataset_path, split='train', img_size=args.img_size, augment=True)
-    val_dataset = COD10KDataset(root_dir=args.dataset_path, split='val', img_size=args.img_size, augment=False)
-    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers,
-                              pin_memory=True, drop_last=True)
-    val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers,
-                            pin_memory=True)
+    # Load datasets
+    train_dataset = COD10KDataset(root_dir=args.dataset_path, split='train',
+                                  img_size=args.img_size, augment=True)
+    val_dataset = COD10KDataset(root_dir=args.dataset_path, split='val',
+                                img_size=args.img_size, augment=False)
+
+    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True,
+                              num_workers=args.num_workers, pin_memory=True, drop_last=True)
+    val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False,
+                            num_workers=args.num_workers, pin_memory=True)
 
     print(f"Datasets: Train={len(train_dataset)}, Val={len(val_dataset)}\n")
 
-    model = CamoXpert(in_channels=3, num_classes=1, pretrained=True).to(device)
+    # Create model with 7 experts
+    model = CamoXpert(in_channels=3, num_classes=1, pretrained=True,
+                      backbone='edgenext_base_usi', num_experts=7).to(device)
+
     total_params, trainable_params = count_parameters(model)
     print(f"Model: {total_params:,} total, {trainable_params:,} trainable\n")
 
@@ -97,6 +112,7 @@ def main(args):
     best_dice = 0
     history = []
 
+    # ======== STAGE 1: Training Decoder (Frozen Backbone) ========
     print("=" * 70)
     print("STAGE 1: Training Decoder (Frozen Backbone)")
     print("=" * 70)
@@ -104,7 +120,8 @@ def main(args):
     for param in model.backbone.parameters():
         param.requires_grad = False
 
-    optimizer = AdamW(filter(lambda p: p.requires_grad, model.parameters()), lr=args.lr, weight_decay=args.weight_decay)
+    optimizer = AdamW(filter(lambda p: p.requires_grad, model.parameters()),
+                      lr=args.lr, weight_decay=args.weight_decay)
     scheduler = CosineAnnealingLR(optimizer, T_max=15, eta_min=1e-6)
 
     for epoch in range(15):
@@ -135,6 +152,7 @@ def main(args):
     print(f"Stage 1 Complete. Best IoU: {best_iou:.4f}, Dice: {best_dice:.4f}")
     print(f"{'=' * 70}\n")
 
+    # ======== STAGE 2: Full Model Fine-tuning ========
     print("=" * 70)
     print("STAGE 2: Full Model Fine-tuning")
     print("=" * 70)
@@ -172,6 +190,7 @@ def main(args):
 
         history.append({'epoch': epoch, 'stage': 2, 'train_loss': train_loss, **val_metrics})
 
+    # Save training history
     with open(os.path.join(args.checkpoint_dir, 'training_history.json'), 'w') as f:
         json.dump(history, f, indent=2)
 
@@ -183,7 +202,8 @@ def main(args):
     print(f"{'=' * 70}\n")
 
 
-parser = argparse.ArgumentParser(description="CamoXpert Training")
+# Create parser at module level
+parser = argparse.ArgumentParser(description="CamoXpert Training (7 Experts)")
 parser.add_argument("--dataset-path", type=str, required=True)
 parser.add_argument("--checkpoint-dir", type=str, default="./checkpoints")
 parser.add_argument("--batch-size", type=int, default=8)
