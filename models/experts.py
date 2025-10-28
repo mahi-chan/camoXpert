@@ -9,35 +9,32 @@ from models.backbone import LayerNorm2d, SDTAEncoder
 
 
 class TextureExpert(nn.Module):
-    """
-    Expert 1: Multi-scale texture pattern recognition
-    Uses dilated convolutions at multiple scales
-    """
+    """Expert 1: Multi-scale texture pattern recognition"""
 
     def __init__(self, dim):
         super().__init__()
         self.branch1 = nn.Sequential(
             nn.Conv2d(dim, dim // 4, 1),
             nn.Conv2d(dim // 4, dim // 4, 3, padding=1, dilation=1),
-            nn.BatchNorm2d(dim // 4),
+            LayerNorm2d(dim // 4),  # FIXED
             nn.GELU()
         )
         self.branch2 = nn.Sequential(
             nn.Conv2d(dim, dim // 4, 1),
             nn.Conv2d(dim // 4, dim // 4, 3, padding=2, dilation=2),
-            nn.BatchNorm2d(dim // 4),
+            LayerNorm2d(dim // 4),  # FIXED
             nn.GELU()
         )
         self.branch3 = nn.Sequential(
             nn.Conv2d(dim, dim // 4, 1),
             nn.Conv2d(dim // 4, dim // 4, 3, padding=3, dilation=3),
-            nn.BatchNorm2d(dim // 4),
+            LayerNorm2d(dim // 4),  # FIXED
             nn.GELU()
         )
         self.branch4 = nn.Sequential(
             nn.Conv2d(dim, dim // 4, 1),
             nn.Conv2d(dim // 4, dim // 4, 3, padding=4, dilation=4),
-            nn.BatchNorm2d(dim // 4),
+            LayerNorm2d(dim // 4),  # FIXED
             nn.GELU()
         )
         self.fusion = nn.Sequential(
@@ -54,7 +51,6 @@ class TextureExpert(nn.Module):
         multi_scale = torch.cat([feat1, feat2, feat3, feat4], dim=1)
         out = self.fusion(multi_scale)
         return out + x
-
 
 class AttentionExpert(nn.Module):
     """
@@ -102,10 +98,7 @@ class HybridExpert(nn.Module):
 
 
 class FrequencyExpert(nn.Module):
-    """
-    Expert 4: Frequency-domain analysis
-    Separates low, mid, high frequency components
-    """
+    """Expert 4: Frequency-domain analysis"""
 
     def __init__(self, dim):
         super().__init__()
@@ -113,22 +106,22 @@ class FrequencyExpert(nn.Module):
 
         self.low_freq_conv = nn.Sequential(
             nn.Conv2d(dim, dim // 4, 1),
-            nn.BatchNorm2d(dim // 4),
+            LayerNorm2d(dim // 4),  # FIXED
             nn.GELU()
         )
         self.mid_freq_conv = nn.Sequential(
             nn.Conv2d(dim, dim // 4, 1),
-            nn.BatchNorm2d(dim // 4),
+            LayerNorm2d(dim // 4),  # FIXED
             nn.GELU()
         )
         self.high_freq_conv = nn.Sequential(
             nn.Conv2d(dim, dim // 4, 1),
-            nn.BatchNorm2d(dim // 4),
+            LayerNorm2d(dim // 4),  # FIXED
             nn.GELU()
         )
         self.spatial_conv = nn.Sequential(
             nn.Conv2d(dim, dim // 4, 1),
-            nn.BatchNorm2d(dim // 4),
+            LayerNorm2d(dim // 4),  # FIXED
             nn.GELU()
         )
 
@@ -147,20 +140,17 @@ class FrequencyExpert(nn.Module):
         )
 
     def forward(self, x):
-        # Approximate DCT decomposition
         low_freq = F.avg_pool2d(x, kernel_size=3, stride=1, padding=1)
         high_freq = x - low_freq
         mid_freq_blur1 = F.avg_pool2d(x, kernel_size=3, stride=1, padding=1)
         mid_freq_blur2 = F.avg_pool2d(x, kernel_size=5, stride=1, padding=2)
         mid_freq = mid_freq_blur1 - mid_freq_blur2
 
-        # Process each frequency band
         low_feat = self.low_freq_conv(low_freq)
         mid_feat = self.mid_freq_conv(mid_freq)
         high_feat = self.high_freq_conv(high_freq)
         spatial_feat = self.spatial_conv(x)
 
-        # Combine frequency features
         freq_features = torch.cat([low_feat, mid_feat, high_feat, spatial_feat], dim=1)
         freq_weight = self.freq_attention(freq_features)
         freq_features = freq_features * freq_weight
@@ -170,16 +160,12 @@ class FrequencyExpert(nn.Module):
 
 
 class EdgeExpert(nn.Module):
-    """
-    Expert 5: Boundary and edge detection
-    Uses Sobel and Laplacian filters
-    """
+    """Expert 5: Boundary and edge detection"""
 
     def __init__(self, dim):
         super().__init__()
         self.dim = dim
 
-        # Edge detection kernels
         sobel_x = torch.tensor([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]],
                                dtype=torch.float32).view(1, 1, 3, 3)
         sobel_y = torch.tensor([[-1, -2, -1], [0, 0, 0], [1, 2, 1]],
@@ -191,25 +177,24 @@ class EdgeExpert(nn.Module):
         self.register_buffer('sobel_y', sobel_y)
         self.register_buffer('laplacian', laplacian)
 
-        # Processing branches
         self.sobel_branch = nn.Sequential(
             nn.Conv2d(dim, dim // 4, 1),
-            nn.BatchNorm2d(dim // 4),
+            LayerNorm2d(dim // 4),  # FIXED
             nn.GELU()
         )
         self.laplacian_branch = nn.Sequential(
             nn.Conv2d(dim, dim // 4, 1),
-            nn.BatchNorm2d(dim // 4),
+            LayerNorm2d(dim // 4),  # FIXED
             nn.GELU()
         )
         self.gradient_branch = nn.Sequential(
             nn.Conv2d(dim, dim // 4, 1),
-            nn.BatchNorm2d(dim // 4),
+            LayerNorm2d(dim // 4),  # FIXED
             nn.GELU()
         )
         self.spatial_branch = nn.Sequential(
             nn.Conv2d(dim, dim // 4, 1),
-            nn.BatchNorm2d(dim // 4),
+            LayerNorm2d(dim // 4),  # FIXED
             nn.GELU()
         )
 
@@ -228,23 +213,16 @@ class EdgeExpert(nn.Module):
         )
 
     def compute_edges(self, x):
-        """Extract edge information using multiple filters"""
         B, C, H, W = x.shape
-
         sobel_edges = []
         laplacian_edges = []
 
         for c in range(C):
             x_c = x[:, c:c + 1, :, :]
-
-            # Sobel edges
             sx = F.conv2d(x_c, self.sobel_x, padding=1)
             sy = F.conv2d(x_c, self.sobel_y, padding=1)
             sobel = torch.sqrt(sx ** 2 + sy ** 2 + 1e-8)
-
-            # Laplacian edges
             lap = torch.abs(F.conv2d(x_c, self.laplacian, padding=1))
-
             sobel_edges.append(sobel)
             laplacian_edges.append(lap)
 
@@ -255,26 +233,18 @@ class EdgeExpert(nn.Module):
         return sobel_feat, laplacian_feat, gradient_feat
 
     def forward(self, x):
-        # Extract edges
         sobel_feat, laplacian_feat, gradient_feat = self.compute_edges(x)
-
-        # Process each type
         sobel_out = self.sobel_branch(sobel_feat)
         lap_out = self.laplacian_branch(laplacian_feat)
         grad_out = self.gradient_branch(gradient_feat)
         spatial_out = self.spatial_branch(x)
 
-        # Combine
         edge_features = torch.cat([sobel_out, lap_out, grad_out, spatial_out], dim=1)
-
-        # Apply attention
         edge_weight = self.edge_attention(edge_features)
         edge_features = edge_features * edge_weight
 
-        # Fuse
         out = self.fusion(edge_features)
         return out + x
-
 
 class SemanticContextExpert(nn.Module):
     """
@@ -360,53 +330,38 @@ class SemanticContextExpert(nn.Module):
 
         return context_feat + x
 
-class ContrastExpert(nn.Module):
-    """
-    Expert 7: Contrast enhancement for low-visibility regions (FROM PROPOSAL)
-    Proposal Section 4.4: "make even faint object regions more visible by
-    highlighting any pixels whose intensity or feature strength differs
-    significantly from their neighbors"
 
-    Techniques:
-    - Local contrast normalization
-    - Adaptive histogram equalization (CLAHE-inspired)
-    - Difference-based enhancement
-    - Visibility boosting
-    """
+class ContrastExpert(nn.Module):
+    """Expert 7: Contrast enhancement for low-visibility regions"""
 
     def __init__(self, dim):
         super().__init__()
         self.dim = dim
 
-        # Local contrast computation
         self.local_contrast = nn.Sequential(
-            nn.Conv2d(dim, dim, 3, padding=1, groups=dim),  # Depthwise
-            nn.BatchNorm2d(dim),
+            nn.Conv2d(dim, dim, 3, padding=1, groups=dim),
+            LayerNorm2d(dim),  # FIXED
             nn.GELU(),
-            nn.Conv2d(dim, dim, 1),  # Pointwise
-            nn.BatchNorm2d(dim)
+            nn.Conv2d(dim, dim, 1),
+            LayerNorm2d(dim)  # FIXED
         )
 
-        # Local neighborhood mean (for contrast reference)
         self.local_mean_conv = nn.Sequential(
             nn.Conv2d(dim, dim, 5, padding=2, groups=dim),
-            nn.BatchNorm2d(dim)
+            LayerNorm2d(dim)  # FIXED
         )
 
-        # Local neighborhood std (for contrast measurement)
         self.local_std_conv = nn.Sequential(
             nn.Conv2d(dim, dim, 5, padding=2, groups=dim),
-            nn.BatchNorm2d(dim)
+            LayerNorm2d(dim)  # FIXED
         )
 
-        # Contrast difference enhancement
         self.diff_enhance = nn.Sequential(
             nn.Conv2d(dim * 2, dim, 1),
-            nn.BatchNorm2d(dim),
+            LayerNorm2d(dim),  # FIXED
             nn.GELU()
         )
 
-        # Adaptive contrast boosting (CLAHE-inspired)
         self.contrast_boost = nn.Sequential(
             nn.AdaptiveAvgPool2d(1),
             nn.Conv2d(dim, dim // 4, 1),
@@ -415,16 +370,14 @@ class ContrastExpert(nn.Module):
             nn.Sigmoid()
         )
 
-        # Visibility enhancement for low-contrast regions
         self.visibility_enhance = nn.Sequential(
             nn.Conv2d(dim, dim, 3, padding=1),
-            nn.BatchNorm2d(dim),
+            LayerNorm2d(dim),  # FIXED
             nn.GELU(),
             nn.Conv2d(dim, dim, 3, padding=1),
-            nn.BatchNorm2d(dim)
+            LayerNorm2d(dim)  # FIXED
         )
 
-        # Final fusion
         self.fusion = nn.Sequential(
             nn.Conv2d(dim, dim, 1),
             LayerNorm2d(dim),
@@ -432,35 +385,20 @@ class ContrastExpert(nn.Module):
         )
 
     def forward(self, x):
-        # Compute local statistics
         local_mean = self.local_mean_conv(x)
         local_std = self.local_std_conv(torch.abs(x - local_mean))
-
-        # Compute contrast: difference from local neighborhood
         local_contrast = self.local_contrast(x)
-
-        # Highlight pixels that differ from neighbors
         diff = torch.abs(x - local_mean)
 
-        # Enhance differences (makes faint objects more visible)
         contrast_feat = self.diff_enhance(torch.cat([local_contrast, diff], dim=1))
-
-        # Boost low-contrast regions adaptively
         boost_weight = self.contrast_boost(contrast_feat)
         contrast_feat = contrast_feat * boost_weight
 
-        # Apply visibility enhancement
         visibility_feat = self.visibility_enhance(contrast_feat)
-
-        # Normalize by local std to make faint regions more prominent
-        # Add small epsilon to avoid division by zero
         normalized_feat = visibility_feat / (local_std + 1e-6)
-
-        # Final fusion
         out = self.fusion(normalized_feat)
 
         return out + x
-
 
 class ExpertRouter(nn.Module):
     """
