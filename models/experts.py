@@ -281,6 +281,8 @@ class SemanticContextExpert(nn.Module):
     Expert 6: High-level semantic scene understanding
     Based on Pyramid Pooling Module (PSPNet) and ASPP (DeepLab)
     Captures multi-scale context for scene-level understanding
+
+    FIX: Uses LayerNorm2d instead of BatchNorm2d to support batch_size=1
     """
 
     def __init__(self, dim):
@@ -293,32 +295,32 @@ class SemanticContextExpert(nn.Module):
         self.pool_3 = nn.AdaptiveAvgPool2d(2)  # 2x2 regions
         self.pool_4 = nn.AdaptiveAvgPool2d(1)  # Global pooling
 
-        # Process each scale
+        # Process each scale - FIXED: LayerNorm2d instead of BatchNorm2d
         self.conv_1 = nn.Sequential(
             nn.Conv2d(dim, dim // 4, 1),
-            nn.BatchNorm2d(dim // 4),
+            LayerNorm2d(dim // 4),  # FIXED
             nn.GELU()
         )
         self.conv_2 = nn.Sequential(
             nn.Conv2d(dim, dim // 4, 1),
-            nn.BatchNorm2d(dim // 4),
+            LayerNorm2d(dim // 4),  # FIXED
             nn.GELU()
         )
         self.conv_3 = nn.Sequential(
             nn.Conv2d(dim, dim // 4, 1),
-            nn.BatchNorm2d(dim // 4),
+            LayerNorm2d(dim // 4),  # FIXED
             nn.GELU()
         )
         self.conv_4 = nn.Sequential(
             nn.Conv2d(dim, dim // 4, 1),
-            nn.BatchNorm2d(dim // 4),
+            LayerNorm2d(dim // 4),  # FIXED
             nn.GELU()
         )
 
-        # Context aggregation
+        # Context aggregation - FIXED
         self.context_fusion = nn.Sequential(
             nn.Conv2d(dim, dim, 1),
-            nn.BatchNorm2d(dim),
+            LayerNorm2d(dim),  # FIXED
             nn.GELU()
         )
 
@@ -357,7 +359,6 @@ class SemanticContextExpert(nn.Module):
         context_feat = context_feat * attention
 
         return context_feat + x
-
 
 class ContrastExpert(nn.Module):
     """
