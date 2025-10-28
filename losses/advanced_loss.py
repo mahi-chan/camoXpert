@@ -48,8 +48,11 @@ class AdvancedCODLoss(nn.Module):
         return 1 - (intersection + 1e-6) / (union + 1e-6)
 
     def boundary_loss(self, pred, target):
-        """Boundary-aware loss using Sobel edge detection"""
-        # Compute edges
+        """
+        Boundary-aware loss using Sobel edge detection
+        FIXED: Use MSE loss instead of BCE for continuous edge values
+        """
+        # Compute edges using Sobel filters
         pred_edges_x = F.conv2d(pred, self.sobel_x, padding=1)
         pred_edges_y = F.conv2d(pred, self.sobel_y, padding=1)
         pred_edges = torch.sqrt(pred_edges_x ** 2 + pred_edges_y ** 2 + 1e-8)
@@ -57,11 +60,13 @@ class AdvancedCODLoss(nn.Module):
         target_edges_x = F.conv2d(target, self.sobel_x, padding=1)
         target_edges_y = F.conv2d(target, self.sobel_y, padding=1)
         target_edges = torch.sqrt(target_edges_x ** 2 + target_edges_y ** 2 + 1e-8)
-        target_edges = (target_edges > 0).float()
 
-        # Weighted boundary loss
-        boundary_loss = F.binary_cross_entropy(pred_edges, target_edges, reduction='none')
-        boundary_loss = (boundary_loss * target_edges).sum() / (target_edges.sum() + 1e-6)
+        # FIXED: Normalize both to [0, 1] for stable comparison
+        pred_edges_norm = pred_edges / (pred_edges.amax(dim=(1, 2, 3), keepdim=True) + 1e-8)
+        target_edges_norm = target_edges / (target_edges.amax(dim=(1, 2, 3), keepdim=True) + 1e-8)
+
+        # Use MSE loss (works for any value range, more stable than BCE for edges)
+        boundary_loss = F.mse_loss(pred_edges_norm, target_edges_norm)
 
         return boundary_loss
 
