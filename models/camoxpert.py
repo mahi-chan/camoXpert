@@ -94,7 +94,7 @@ class CamoXpert(nn.Module):
     """
 
     def __init__(self, in_channels=3, num_classes=1, pretrained=True,
-                 backbone='edgenext-base-usi', num_experts=7):
+                 backbone='edgenext_base', num_experts=7):
         super().__init__()
 
         self.backbone_name = backbone
