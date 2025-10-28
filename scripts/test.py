@@ -42,38 +42,90 @@ def evaluate_model(model, dataloader, device):
     return aggregated_metrics
 
 
+def print_test_results(metrics):
+    """Print test results in a formatted way"""
+    print("\n" + "=" * 80)
+    print("TEST RESULTS")
+    print("=" * 80)
+
+    print("\n📊 ACCURACY METRICS")
+    print("-" * 80)
+    print(f"  Pixel Accuracy:        {metrics['Pixel_Accuracy']:.4f}  ({metrics['Pixel_Accuracy'] * 100:.2f}%)")
+    print(f"  Precision:             {metrics['Precision']:.4f}  ({metrics['Precision'] * 100:.2f}%)")
+    print(f"  Recall (Sensitivity):  {metrics['Recall']:.4f}  ({metrics['Recall'] * 100:.2f}%)")
+    print(f"  Specificity:           {metrics['Specificity']:.4f}  ({metrics['Specificity'] * 100:.2f}%)")
+
+    print("\n📐 SEGMENTATION METRICS")
+    print("-" * 80)
+    print(f"  IoU (Jaccard Index):   {metrics['IoU']:.4f}  ({metrics['IoU'] * 100:.2f}%)")
+    print(f"  Dice Score (F1):       {metrics['Dice_Score']:.4f}  ({metrics['Dice_Score'] * 100:.2f}%)")
+    print(f"  F-measure (β=0.3):     {metrics['F-measure']:.4f}  ({metrics['F-measure'] * 100:.2f}%)")
+
+    print("\n🎯 CAMOUFLAGE-SPECIFIC METRICS")
+    print("-" * 80)
+    print(f"  S-measure:             {metrics['S-measure']:.4f}  (Structure similarity)")
+    print(f"  E-measure:             {metrics['E-measure']:.4f}  (Enhanced alignment)")
+    print(f"  MAE:                   {metrics['MAE']:.4f}  (Mean Absolute Error)")
+
+    print("\n" + "=" * 80)
+
+    # Performance summary
+    print("\n📈 PERFORMANCE SUMMARY")
+    print("-" * 80)
+    avg_detection = (metrics['Precision'] + metrics['Recall']) / 2
+    avg_segmentation = (metrics['IoU'] + metrics['Dice_Score']) / 2
+
+    print(f"  Average Detection Performance:     {avg_detection:.4f}")
+    print(f"  Average Segmentation Performance:  {avg_segmentation:.4f}")
+    print(f"  Overall Score:                     {(avg_detection + avg_segmentation) / 2:.4f}")
+    print("=" * 80 + "\n")
+
+
 def main(args):
     # Set device
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device}")
+    print(f"\n{'=' * 80}")
+    print(f"CamoXpert Test Script")
+    print(f"{'=' * 80}")
+    print(f"Device: {device}")
+    print(f"Dataset: {args.dataset_path}")
+    print(f"Checkpoint: {args.checkpoint}")
+    print(f"{'=' * 80}\n")
 
     # Load dataset
     print("Loading test dataset...")
     dataset = COD10KDataset(root_dir=args.dataset_path, split="test", img_size=args.img_size, augment=False)
     dataloader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False, num_workers=4, pin_memory=True)
-    print(f"Test samples: {len(dataset)}")
+    print(f"✓ Test samples: {len(dataset)}\n")
 
     # Load model
     print("Loading model...")
     model = CamoXpert(in_channels=3, num_classes=1)
     load_checkpoint(args.checkpoint, model)
     model = model.to(device)
+    print("✓ Model loaded successfully\n")
 
     # Print model statistics
     total_params, trainable_params = count_parameters(model)
-    print(f"Total Parameters: {total_params:,}")
-    print(f"Trainable Parameters: {trainable_params:,}")
+    print("Model Statistics:")
+    print(f"  Total Parameters:      {total_params:,}")
+    print(f"  Trainable Parameters:  {trainable_params:,}")
+    print(f"  Model Size:            {total_params * 4 / 1024 / 1024:.2f} MB (FP32)\n")
 
     # Evaluate model
-    print("\nEvaluating model...")
+    print("Evaluating model on test set...")
+    print("-" * 80)
     metrics = evaluate_model(model, dataloader, device)
 
-    print("\n")
-    print("TEST RESULTS")
-    print("\n")
-    for metric, value in metrics.items():
-        print(f"{metric:.<30} {value:.4f}")
-    print("\n")
+    # Print results
+    print_test_results(metrics)
+
+    # Save results to file
+    import json
+    results_file = os.path.join(os.path.dirname(args.checkpoint), 'test_results.json')
+    with open(results_file, 'w') as f:
+        json.dump(metrics, f, indent=2)
+    print(f"Results saved to: {results_file}\n")
 
 
 # Create parser at module level

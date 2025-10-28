@@ -4,11 +4,58 @@ import numpy as np
 
 class CODMetrics:
     @torch.no_grad()
+    def pixel_accuracy(self, pred, target, threshold=0.5):
+        """Calculate pixel-wise accuracy"""
+        pred = (pred > threshold).float().detach()
+        target = target.detach()
+        correct = (pred == target).float().sum()
+        total = target.numel()
+        return (correct / total).item()
+
+    @torch.no_grad()
+    def precision(self, pred, target, threshold=0.5):
+        """Calculate precision (positive predictive value)"""
+        pred = (pred > threshold).float().detach()
+        target = target.detach()
+        tp = (pred * target).sum()
+        fp = (pred * (1 - target)).sum()
+        return (tp / (tp + fp + 1e-6)).item()
+
+    @torch.no_grad()
+    def recall(self, pred, target, threshold=0.5):
+        """Calculate recall (sensitivity)"""
+        pred = (pred > threshold).float().detach()
+        target = target.detach()
+        tp = (pred * target).sum()
+        fn = ((1 - pred) * target).sum()
+        return (tp / (tp + fn + 1e-6)).item()
+
+    @torch.no_grad()
+    def dice_score(self, pred, target, threshold=0.5):
+        """Calculate Dice Score (F1 Score)"""
+        pred = (pred > threshold).float().detach()
+        target = target.detach()
+        intersection = (pred * target).sum()
+        union = pred.sum() + target.sum()
+        return ((2.0 * intersection + 1e-6) / (union + 1e-6)).item()
+
+    @torch.no_grad()
+    def specificity(self, pred, target, threshold=0.5):
+        """Calculate specificity (true negative rate)"""
+        pred = (pred > threshold).float().detach()
+        target = target.detach()
+        tn = ((1 - pred) * (1 - target)).sum()
+        fp = (pred * (1 - target)).sum()
+        return (tn / (tn + fp + 1e-6)).item()
+
+    @torch.no_grad()
     def mae(self, pred, target):
+        """Mean Absolute Error"""
         return torch.abs(pred.detach() - target.detach()).mean().item()
 
     @torch.no_grad()
     def iou(self, pred, target, threshold=0.5):
+        """Intersection over Union"""
         pred = (pred > threshold).float().detach()
         target = target.detach()
         intersection = (pred * target).sum()
@@ -17,6 +64,7 @@ class CODMetrics:
 
     @torch.no_grad()
     def f_measure(self, pred, target, threshold=0.5, beta=0.3):
+        """F-measure (weighted F-score)"""
         pred = (pred > threshold).float().detach()
         target = target.detach()
         tp = (pred * target).sum()
@@ -28,6 +76,7 @@ class CODMetrics:
 
     @torch.no_grad()
     def s_measure(self, pred, target, alpha=0.5):
+        """Structure Measure"""
         pred = pred.detach()
         target = target.detach()
         y = target.mean()
@@ -74,8 +123,10 @@ class CODMetrics:
         target1, target2, target3, target4 = target[:, :, :Y, :X], target[:, :, :Y, X:], target[:, :, Y:, :X], target[:,
                                                                                                                :, Y:,
                                                                                                                X:]
-        w1, w2, w3, w4 = X * Y / (h * w + 1e-8), (w - X) * Y / (h * w + 1e-8), X * (h - Y) / (h * w + 1e-8), (w - X) * (
-                    h - Y) / (h * w + 1e-8)
+        w1 = X * Y / (h * w + 1e-8)
+        w2 = (w - X) * Y / (h * w + 1e-8)
+        w3 = X * (h - Y) / (h * w + 1e-8)
+        w4 = (w - X) * (h - Y) / (h * w + 1e-8)
         return pred1, pred2, pred3, pred4, w1, w2, w3, w4
 
     def _ssim(self, pred, target):
@@ -93,6 +144,7 @@ class CODMetrics:
 
     @torch.no_grad()
     def e_measure(self, pred, target):
+        """Enhanced-alignment Measure"""
         pred, target = pred.detach(), target.detach()
         if target.sum() == 0:
             return (1 - pred).mean().item()
@@ -108,11 +160,20 @@ class CODMetrics:
             enhanced_matrix += ((pred - pred.mean()) ** 2) * target_bg / (target_bg.sum() + 1e-8)
         return 2 * enhanced_matrix
 
-    def compute_all(self, pred, target):
+    def compute_all(self, pred, target, threshold=0.5):
+        """Compute all metrics including accuracy metrics"""
         return {
+            # Standard metrics
             'MAE': self.mae(pred, target),
-            'IoU': self.iou(pred, target),
-            'F-measure': self.f_measure(pred, target),
+            'IoU': self.iou(pred, target, threshold),
+            'F-measure': self.f_measure(pred, target, threshold),
             'S-measure': self.s_measure(pred, target),
-            'E-measure': self.e_measure(pred, target)
+            'E-measure': self.e_measure(pred, target),
+
+            # Accuracy metrics
+            'Pixel_Accuracy': self.pixel_accuracy(pred, target, threshold),
+            'Precision': self.precision(pred, target, threshold),
+            'Recall': self.recall(pred, target, threshold),
+            'Dice_Score': self.dice_score(pred, target, threshold),
+            'Specificity': self.specificity(pred, target, threshold)
         }

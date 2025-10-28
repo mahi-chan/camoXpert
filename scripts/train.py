@@ -46,16 +46,35 @@ def validate(model, dataloader, metrics, device):
     return {k: sum(d[k] for d in all_metrics) / len(all_metrics) for k in all_metrics[0]}
 
 
+def print_metrics(metrics_dict):
+    """Print metrics in organized format"""
+    print(f"\n  Accuracy Metrics:")
+    print(f"    Pixel Accuracy: {metrics_dict.get('Pixel_Accuracy', 0):.4f}")
+    print(f"    Precision:      {metrics_dict.get('Precision', 0):.4f}")
+    print(f"    Recall:         {metrics_dict.get('Recall', 0):.4f}")
+    print(f"    Dice Score:     {metrics_dict.get('Dice_Score', 0):.4f}")
+
+    print(f"  Segmentation Metrics:")
+    print(f"    IoU:            {metrics_dict.get('IoU', 0):.4f}")
+    print(f"    F-measure:      {metrics_dict.get('F-measure', 0):.4f}")
+    print(f"    S-measure:      {metrics_dict.get('S-measure', 0):.4f}")
+    print(f"    E-measure:      {metrics_dict.get('E-measure', 0):.4f}")
+    print(f"    MAE:            {metrics_dict.get('MAE', 0):.4f}")
+
+
 def main(args):
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
     set_seed(args.seed)
 
+    print("\n" + "=" * 70)
     print("CamoXpert Training with Pretrained EdgeNeXt Backbone")
+    print("=" * 70)
     print(f"Device: {device}")
     print(f"Batch Size: {args.batch_size}")
     print(f"Total Epochs: {args.epochs}")
     print(f"Stage 1 (Frozen Backbone): 15 epochs")
     print(f"Stage 2 (Full Fine-tuning): {args.epochs - 15} epochs")
+    print("=" * 70 + "\n")
 
     train_dataset = COD10KDataset(root_dir=args.dataset_path, split='train', img_size=args.img_size, augment=True)
     val_dataset = COD10KDataset(root_dir=args.dataset_path, split='val', img_size=args.img_size, augment=False)
@@ -64,7 +83,7 @@ def main(args):
     val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers,
                             pin_memory=True)
 
-    print(f"\nDatasets: Train={len(train_dataset)}, Val={len(val_dataset)}\n")
+    print(f"Datasets: Train={len(train_dataset)}, Val={len(val_dataset)}\n")
 
     model = CamoXpert(in_channels=3, num_classes=1, pretrained=True).to(device)
     total_params, trainable_params = count_parameters(model)
@@ -75,9 +94,12 @@ def main(args):
     os.makedirs(args.checkpoint_dir, exist_ok=True)
 
     best_iou = 0
+    best_dice = 0
     history = []
 
+    print("=" * 70)
     print("STAGE 1: Training Decoder (Frozen Backbone)")
+    print("=" * 70)
 
     for param in model.backbone.parameters():
         param.requires_grad = False
@@ -91,22 +113,31 @@ def main(args):
         val_metrics = validate(model, val_loader, metrics, device)
         scheduler.step()
 
-        print(f"Loss: {train_loss:.4f}")
-        print(
-            f"Val - MAE: {val_metrics['MAE']:.4f} | IoU: {val_metrics['IoU']:.4f} | F1: {val_metrics['F-measure']:.4f} | S: {val_metrics['S-measure']:.4f} | E: {val_metrics['E-measure']:.4f}")
+        print(f"  Train Loss: {train_loss:.4f}")
+        print_metrics(val_metrics)
 
         if val_metrics['IoU'] > best_iou:
             best_iou = val_metrics['IoU']
-            torch.save(
-                {'epoch': epoch, 'model_state_dict': model.state_dict(), 'optimizer_state_dict': optimizer.state_dict(),
-                 'best_iou': best_iou, 'val_metrics': val_metrics}, os.path.join(args.checkpoint_dir, 'best_model.pth'))
-            print(f"✓ New best! IoU: {best_iou:.4f}")
+            best_dice = val_metrics['Dice_Score']
+            torch.save({
+                'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'best_iou': best_iou,
+                'best_dice': best_dice,
+                'val_metrics': val_metrics
+            }, os.path.join(args.checkpoint_dir, 'best_model.pth'))
+            print(f"\n  ✓ New best! IoU: {best_iou:.4f}, Dice: {best_dice:.4f}")
 
-        history.append({'epoch': epoch, 'train_loss': train_loss, **val_metrics})
+        history.append({'epoch': epoch, 'stage': 1, 'train_loss': train_loss, **val_metrics})
 
-    print(f"\nStage 1 Complete. Best IoU: {best_iou:.4f}\n")
+    print(f"\n{'=' * 70}")
+    print(f"Stage 1 Complete. Best IoU: {best_iou:.4f}, Dice: {best_dice:.4f}")
+    print(f"{'=' * 70}\n")
 
+    print("=" * 70)
     print("STAGE 2: Full Model Fine-tuning")
+    print("=" * 70)
 
     for param in model.parameters():
         param.requires_grad = True
@@ -123,23 +154,33 @@ def main(args):
         val_metrics = validate(model, val_loader, metrics, device)
         scheduler.step()
 
-        print(f"Loss: {train_loss:.4f}")
-        print(
-            f"Val - MAE: {val_metrics['MAE']:.4f} | IoU: {val_metrics['IoU']:.4f} | F1: {val_metrics['F-measure']:.4f} | S: {val_metrics['S-measure']:.4f} | E: {val_metrics['E-measure']:.4f}")
+        print(f"  Train Loss: {train_loss:.4f}")
+        print_metrics(val_metrics)
 
         if val_metrics['IoU'] > best_iou:
             best_iou = val_metrics['IoU']
-            torch.save(
-                {'epoch': epoch, 'model_state_dict': model.state_dict(), 'optimizer_state_dict': optimizer.state_dict(),
-                 'best_iou': best_iou, 'val_metrics': val_metrics}, os.path.join(args.checkpoint_dir, 'best_model.pth'))
-            print(f"✓ New best! IoU: {best_iou:.4f}")
+            best_dice = val_metrics['Dice_Score']
+            torch.save({
+                'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'best_iou': best_iou,
+                'best_dice': best_dice,
+                'val_metrics': val_metrics
+            }, os.path.join(args.checkpoint_dir, 'best_model.pth'))
+            print(f"\n  ✓ New best! IoU: {best_iou:.4f}, Dice: {best_dice:.4f}")
 
-        history.append({'epoch': epoch, 'train_loss': train_loss, **val_metrics})
+        history.append({'epoch': epoch, 'stage': 2, 'train_loss': train_loss, **val_metrics})
 
     with open(os.path.join(args.checkpoint_dir, 'training_history.json'), 'w') as f:
         json.dump(history, f, indent=2)
 
-    print(f"Training Complete! Best IoU: {best_iou:.4f}")
+    print(f"\n{'=' * 70}")
+    print(f"Training Complete!")
+    print(f"{'=' * 70}")
+    print(f"Best IoU:        {best_iou:.4f}")
+    print(f"Best Dice Score: {best_dice:.4f}")
+    print(f"{'=' * 70}\n")
 
 
 parser = argparse.ArgumentParser(description="CamoXpert Training")
@@ -153,8 +194,6 @@ parser.add_argument("--weight-decay", type=float, default=0.01)
 parser.add_argument("--seed", type=int, default=42)
 parser.add_argument("--device", type=str, default="cuda")
 parser.add_argument("--num-workers", type=int, default=2)
-parser.add_argument("--t0", type=int, default=10)
-parser.add_argument("--t-mult", type=int, default=2)
 
 if __name__ == "__main__":
     args = parser.parse_args()

@@ -2,37 +2,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import timm
-
-
-class MoELayer(nn.Module):
-    def __init__(self, dim, num_experts=4):  # Increased to 4 experts
-        super().__init__()
-        self.num_experts = num_experts
-        self.router = nn.Linear(dim, num_experts)
-        self.experts = nn.ModuleList([
-            nn.Sequential(
-                nn.Conv2d(dim, dim * 2, 3, padding=1),
-                nn.BatchNorm2d(dim * 2),
-                nn.GELU(),
-                nn.Conv2d(dim * 2, dim, 3, padding=1),
-                nn.BatchNorm2d(dim)
-            ) for _ in range(num_experts)
-        ])
-
-    def forward(self, x):
-        B, C, H, W = x.shape
-        x_pooled = F.adaptive_avg_pool2d(x, 1).flatten(1)
-        router_logits = self.router(x_pooled)
-        router_probs = F.softmax(router_logits, dim=-1)
-        expert_outputs = torch.stack([expert(x) for expert in self.experts], dim=1)
-        router_probs = router_probs.view(B, self.num_experts, 1, 1, 1)
-        output = (expert_outputs * router_probs).sum(dim=1)
-
-        mean_routing = router_probs.squeeze(-1).squeeze(-1).squeeze(-1).mean(dim=0)
-        target_dist = torch.ones_like(mean_routing) / self.num_experts
-        aux_loss = F.mse_loss(mean_routing, target_dist) * 0.01
-
-        return output, aux_loss
+from models.experts import MoELayer  # Import the CORRECT MoELayer with specialized experts
 
 
 class SDTABlock(nn.Module):
@@ -96,7 +66,7 @@ class CamoXpert(nn.Module):
 
         self.backbone_name = backbone
 
-        # Create backbone with edgenext_base_usi
+        # Create backbone
         print(f"Creating backbone: {backbone}")
         self.backbone = timm.create_model(
             backbone,
@@ -108,11 +78,14 @@ class CamoXpert(nn.Module):
         self.feature_dims = [f['num_chs'] for f in self.backbone.feature_info]
         print(f"Feature dimensions: {self.feature_dims}")
 
-        # Enhanced SDTA and MoE layers
+        # FIXED: Use specialized MoE layers with 4 experts
+        print(f"\nInitializing {num_experts} specialized experts per layer...")
         self.sdta_blocks = nn.ModuleList([SDTABlock(dim) for dim in self.feature_dims])
-        self.moe_layers = nn.ModuleList([MoELayer(dim, num_experts) for dim in self.feature_dims])
+        self.moe_layers = nn.ModuleList([
+            MoELayer(dim, num_experts=num_experts) for dim in self.feature_dims
+        ])
 
-        # Larger decoder for base models
+        # Decoder
         decoder_channels = [512, 256, 128, 64]
         self.decoder_blocks = nn.ModuleList()
 
@@ -133,7 +106,7 @@ class CamoXpert(nn.Module):
                 DecoderBlock(in_channels, decoder_channels[i], use_attention=True)
             )
 
-        # Enhanced final conv with deep supervision
+        # Final convolution
         self.final_conv = nn.Sequential(
             nn.Conv2d(decoder_channels[-1], 64, 3, padding=1),
             nn.BatchNorm2d(64),
@@ -144,24 +117,39 @@ class CamoXpert(nn.Module):
             nn.Conv2d(32, num_classes, 1)
         )
 
-        # Deep supervision heads for intermediate outputs
+        # Deep supervision heads
         self.deep_supervision = nn.ModuleList([
             nn.Conv2d(decoder_channels[i], num_classes, 1)
             for i in range(len(decoder_channels))
         ])
 
+        print(f"\nCamoXpert initialized with:")
+        print(f"  - Backbone: {backbone}")
+        print(f"  - 4 Specialized Experts per layer:")
+        print(f"    1. TextureExpert (multi-scale patterns)")
+        print(f"    2. AttentionExpert (global context)")
+        print(f"    3. HybridExpert (local-global fusion)")
+        print(f"    4. FrequencyExpert (frequency analysis)")
+        print(f"  - {len(self.feature_dims)} encoder stages")
+        print(f"  - {len(decoder_channels)} decoder stages")
+        print(f"  - Deep supervision: enabled\n")
+
     def forward(self, x, return_deep_supervision=False):
         input_size = x.shape[2:]
 
-        # Extract multi-scale features
+        # Extract multi-scale features from backbone
         features = self.backbone(x)
 
-        # Enhance features with SDTA and MoE
+        # Enhance features with SDTA and specialized MoE
         enhanced_features = []
         total_aux_loss = 0
-        for feat, sdta, moe in zip(features, self.sdta_blocks, self.moe_layers):
+        for i, (feat, sdta, moe) in enumerate(zip(features, self.sdta_blocks, self.moe_layers)):
+            # Apply SDTA enhancement
             feat = sdta(feat)
+
+            # Apply MoE with 4 specialized experts
             feat, aux_loss = moe(feat)
+
             enhanced_features.append(feat)
             total_aux_loss += aux_loss
 
@@ -201,3 +189,43 @@ class CamoXpert(nn.Module):
             return final_output, total_aux_loss, deep_outputs
 
         return final_output, total_aux_loss
+
+
+# Utility function for model analysis
+def analyze_model(model, input_size=(1, 3, 416, 416), device='cuda'):
+    """
+    Analyze the CamoXpert model structure and expert usage.
+
+    Args:
+        model: CamoXpert model instance
+        input_size: Input tensor size
+        device: Device to run on
+    """
+    from models.experts import visualize_expert_routing
+
+    model.eval()
+    dummy_input = torch.randn(input_size).to(device)
+
+    print("\n" + "=" * 70)
+    print("MODEL ANALYSIS")
+    print("=" * 70)
+
+    # Forward pass
+    with torch.no_grad():
+        output, aux_loss = model(dummy_input)
+
+    print(f"\nInput shape:  {dummy_input.shape}")
+    print(f"Output shape: {output.shape}")
+    print(f"Aux loss:     {aux_loss.item():.6f}")
+
+    # Analyze expert routing at each stage
+    features = model.backbone(dummy_input)
+    print(f"\n Expert Routing Analysis:")
+    print("-" * 70)
+
+    for i, (feat, sdta, moe) in enumerate(zip(features, model.sdta_blocks, model.moe_layers)):
+        print(f"\nStage {i + 1} (dim={feat.shape[1]}):")
+        feat = sdta(feat)
+        visualize_expert_routing(moe, feat)
+
+    print("\n" + "=" * 70)
