@@ -469,33 +469,52 @@ class MoELayer(nn.Module):
     Each input selects 4 most relevant experts (57% of total experts)
     """
 
-    def __init__(self, dim, num_experts=7, top_k=4):
+    def __init__(self, in_channels, num_experts=5, top_k=3):
+        """
+        Args:
+            in_channels: Input channel dimension
+            num_experts: Number of experts to CREATE (not select from)
+            top_k: Number of experts to activate per input
+        """
         super().__init__()
 
-        # 7 Specialized Experts
-        self.experts = nn.ModuleList([
-            TextureExpert(dim),  # Expert 1
-            AttentionExpert(dim),  # Expert 2
-            HybridExpert(dim),  # Expert 3
-            FrequencyExpert(dim),  # Expert 4
-            EdgeExpert(dim),  # Expert 5
-            SemanticContextExpert(dim),  # Expert 6
-            ContrastExpert(dim)  # Expert 7 (FROM PROPOSAL)
-        ])
-
-        self.router = ExpertRouter(dim, num_experts, top_k)
         self.num_experts = num_experts
-        self.top_k = top_k
+        self.top_k = min(top_k, num_experts)  # Can't select more than available
+
+        # Define ALL possible expert types
+        expert_constructors = [
+            ('TextureExpert', TextureExpert),
+            ('AttentionExpert', AttentionExpert),
+            ('HybridExpert', HybridExpert),
+            ('FrequencyExpert', FrequencyExpert),
+            ('EdgeExpert', EdgeExpert),
+            ('SemanticContextExpert', SemanticContextExpert),
+            ('ContrastExpert', ContrastExpert),
+        ]
+
+        # Create only num_experts (not all 7)
+        self.experts = nn.ModuleList()
+        self.expert_names = []
+
+        for i in range(num_experts):
+            name, constructor = expert_constructors[i % len(expert_constructors)]
+            self.experts.append(constructor(in_channels))
+            self.expert_names.append(name)
+
+        # Gating network
+        self.gate = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Conv2d(in_channels, num_experts, 1),
+            nn.Softmax(dim=1)
+        )
+
+        # Load balancing
+        self.register_buffer('expert_counts', torch.zeros(num_experts))
 
         print(f"✓ MoELayer initialized with {num_experts} experts, Top-{top_k} routing:")
-        print("  1. TextureExpert (multi-scale dilated convolutions)")
-        print("  2. AttentionExpert (SDTA self-attention)")
-        print("  3. HybridExpert (local-global fusion)")
-        print("  4. FrequencyExpert (frequency-domain analysis)")
-        print("  5. EdgeExpert (boundary detection)")
-        print("  6. SemanticContextExpert (pyramid pooling)")
-        print("  7. ContrastExpert (visibility enhancement) ← FROM PROPOSAL")
-        print(f"  → Computation: {top_k}/{num_experts} experts per input ({top_k / num_experts * 100:.1f}%)")
+        for i, name in enumerate(self.expert_names, 1):
+            print(f"  {i}. {name}")
+        print(f"  → Computation: {top_k}/{num_experts} experts per input ({100 * top_k / num_experts:.1f}%)")
 
     def forward(self, x):
         """
