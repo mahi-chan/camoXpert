@@ -107,7 +107,7 @@ def train_epoch(model, loader, criterion, optimizer, scaler, accumulation_steps,
         images = images.cuda(non_blocking=True)
         masks = masks.cuda(non_blocking=True)
 
-        with torch.cuda.amp.autocast('cuda'):
+        with torch.cuda.amp.autocast():
             pred, aux_loss, deep = model(images, return_deep_supervision=use_deep_sup)
             loss, _ = criterion(pred, masks, aux_loss, deep)
             loss = loss / accumulation_steps
