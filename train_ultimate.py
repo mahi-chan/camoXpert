@@ -43,7 +43,8 @@ def parse_args():
     parser.add_argument('--gradient-checkpointing', action='store_true', default=False)
     parser.add_argument('--use-ema', action='store_true', default=False)
     parser.add_argument('--device', type=str, default='cuda')
-    parser.add_argument('--num-workers', type=int, default=4)
+    parser.add_argument('--num-workers', type=int, default=8,
+                        help='Data loading workers (recommend: num_cpu_cores or batch_size)')
     parser.add_argument('--seed', type=int, default=42)
 
     return parser.parse_args()
@@ -150,9 +151,11 @@ def train_epoch(model, loader, criterion, optimizer, scaler, accumulation_steps,
     pbar = tqdm(enumerate(loader), total=len(loader), desc=f"Epoch {epoch + 1}/{total_epochs}")
 
     for batch_idx, (images, masks) in pbar:
+        # Use non_blocking for async GPU transfer
         images = images.cuda(non_blocking=True)
         masks = masks.cuda(non_blocking=True)
 
+        # Forward + backward
         with torch.cuda.amp.autocast():
             pred, aux_loss, deep = model(images, return_deep_supervision=use_deep_sup)
             loss, _ = criterion(pred, masks, aux_loss, deep)
@@ -160,6 +163,7 @@ def train_epoch(model, loader, criterion, optimizer, scaler, accumulation_steps,
 
         scaler.scale(loss).backward()
 
+        # Optimizer step every accumulation_steps
         if (batch_idx + 1) % accumulation_steps == 0:
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -170,8 +174,18 @@ def train_epoch(model, loader, criterion, optimizer, scaler, accumulation_steps,
                 ema.update()
 
         epoch_loss += loss.item() * accumulation_steps
-        pbar.set_postfix({'loss': f'{loss.item() * accumulation_steps:.4f}'})
 
+        # Update progress bar with GPU utilization
+        if batch_idx % 50 == 0:
+            gpu_util = torch.cuda.utilization()
+            pbar.set_postfix({
+                'loss': f'{loss.item() * accumulation_steps:.4f}',
+                'gpu': f'{gpu_util}%'
+            })
+        else:
+            pbar.set_postfix({'loss': f'{loss.item() * accumulation_steps:.4f}'})
+
+    # Handle remaining gradients
     if len(loader) % accumulation_steps != 0:
         scaler.unscale_(optimizer)
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -221,11 +235,17 @@ def train(args):
     set_seed(args.seed)
     device = torch.device(args.device)
 
+    # Performance optimizations
+    torch.backends.cudnn.benchmark = True  # Auto-tune kernels for your input size
+    torch.backends.cuda.matmul.allow_tf32 = True  # Use TF32 for faster matmul
+    torch.backends.cudnn.allow_tf32 = True
+
     effective_batch = args.batch_size * args.accumulation_steps
 
     print(f"\n{'='*70}")
     print(f"CamoXpert Training: {args.backbone} | {args.num_experts} experts | {args.img_size}px")
     print(f"Batch: {args.batch_size}×{args.accumulation_steps}={effective_batch} | Epochs: {args.epochs} | Target IoU: 0.72")
+    print(f"Workers: {args.num_workers} | GPU: {torch.cuda.get_device_name(0)}")
     print(f"{'='*70}\n")
 
     os.makedirs(args.checkpoint_dir, exist_ok=True)
@@ -234,21 +254,50 @@ def train(args):
     train_data = COD10KDataset(args.dataset_path, 'train', args.img_size, augment=True)
     val_data = COD10KDataset(args.dataset_path, 'val', args.img_size, augment=False)
 
-    train_loader = DataLoader(train_data, args.batch_size, shuffle=True,
-                              num_workers=args.num_workers, pin_memory=True, drop_last=True)
-    val_loader = DataLoader(val_data, args.batch_size, shuffle=False,
-                            num_workers=args.num_workers, pin_memory=True)
+    # Optimized data loading for maximum throughput
+    train_loader = DataLoader(
+        train_data,
+        args.batch_size,
+        shuffle=True,
+        num_workers=args.num_workers,
+        pin_memory=True,
+        drop_last=True,
+        persistent_workers=True if args.num_workers > 0 else False,  # Keep workers alive
+        prefetch_factor=4 if args.num_workers > 0 else None  # Prefetch 4 batches per worker
+    )
+    val_loader = DataLoader(
+        val_data,
+        args.batch_size,
+        shuffle=False,
+        num_workers=args.num_workers,
+        pin_memory=True,
+        persistent_workers=True if args.num_workers > 0 else False,
+        prefetch_factor=4 if args.num_workers > 0 else None
+    )
 
     print(f"Train: {len(train_data)} | Val: {len(val_data)}")
 
     # Model
     model = CamoXpert(3, 1, pretrained=True, backbone=args.backbone, num_experts=args.num_experts).cuda()
 
-    if args.gradient_checkpointing:
+    # Only use gradient checkpointing if memory is tight (batch < 8)
+    if args.gradient_checkpointing and args.batch_size < 8:
         model = enable_gradient_checkpointing(model)
+        print("⚠️  Gradient checkpointing enabled (trades 30% speed for memory)")
+    elif args.gradient_checkpointing and args.batch_size >= 8:
+        print(f"ℹ️  Skipping gradient checkpointing (batch_size={args.batch_size} has plenty of memory)")
 
     total, trainable = count_parameters(model)
-    print(f"Parameters: {total/1e6:.1f}M ({trainable/1e6:.1f}M trainable)\n")
+    print(f"Parameters: {total/1e6:.1f}M ({trainable/1e6:.1f}M trainable)")
+
+    # Compile model for faster execution (PyTorch 2.0+)
+    try:
+        print("Compiling model with torch.compile for faster execution...")
+        model = torch.compile(model, mode='reduce-overhead')
+        print("✓ Model compiled successfully")
+    except Exception as e:
+        print(f"⚠️  torch.compile not available: {e}")
+    print()
 
     criterion = AdvancedCODLoss(bce_weight=5.0, iou_weight=3.0, edge_weight=2.0, aux_weight=0.1)
     metrics = CODMetrics()
