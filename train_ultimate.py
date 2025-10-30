@@ -76,32 +76,23 @@ class EMA:
 
 
 def enable_gradient_checkpointing(model):
-    """
-    Enable gradient checkpointing for memory-intensive modules.
-    Only checkpoint MoE layers as they are the most memory-intensive.
-    SDTA blocks are lightweight and checkpointing them causes issues.
-    """
-    print("🔧 Enabling gradient checkpointing...")
+    """Enable gradient checkpointing for MoE layers (memory-intensive)"""
     checkpointed = 0
 
-    # Only checkpoint MoE layers, not SDTA
     for name, module in model.named_modules():
         if 'moe' in name.lower() and hasattr(module, '__class__'):
-            # Check if it's an MoELayer module
             if module.__class__.__name__ == 'MoELayer':
-                # Store original forward
                 original_forward = module.forward
 
                 def create_checkpoint_wrapper(orig_forward):
                     def wrapper(x):
-                        # Use gradient checkpointing for this module
                         return gradient_checkpoint(orig_forward, x, use_reentrant=False)
                     return wrapper
 
                 module.forward = create_checkpoint_wrapper(original_forward)
                 checkpointed += 1
 
-    print(f"✓ Checkpointed {checkpointed} MoE modules")
+    print(f"✓ Gradient checkpointing enabled ({checkpointed} MoE layers)")
     return model
 
 
@@ -164,19 +155,10 @@ def train(args):
 
     effective_batch = args.batch_size * args.accumulation_steps
 
-    print("\n" + "=" * 70)
-    print("CAMOXPERT ULTIMATE TRAINING")
-    print("=" * 70)
-    print(f"Backbone:         {args.backbone}")
-    print(f"Experts:          {args.num_experts}")
-    print(f"Resolution:       {args.img_size}px")
-    print(f"Batch Size:       {args.batch_size} × {args.accumulation_steps} = {effective_batch} effective")
-    print(f"Epochs:           {args.epochs}")
-    print(f"Deep Supervision: {args.deep_supervision}")
-    print(f"Grad Checkpoint:  {args.gradient_checkpointing}")
-    print(f"EMA:              {args.use_ema}")
-    print(f"\n🎯 Target: IoU ≥ 0.72")
-    print("=" * 70 + "\n")
+    print(f"\n{'='*70}")
+    print(f"CamoXpert Training: {args.backbone} | {args.num_experts} experts | {args.img_size}px")
+    print(f"Batch: {args.batch_size}×{args.accumulation_steps}={effective_batch} | Epochs: {args.epochs} | Target IoU: 0.72")
+    print(f"{'='*70}\n")
 
     os.makedirs(args.checkpoint_dir, exist_ok=True)
 
@@ -189,7 +171,7 @@ def train(args):
     val_loader = DataLoader(val_data, args.batch_size, shuffle=False,
                             num_workers=args.num_workers, pin_memory=True)
 
-    print(f"Train: {len(train_data)} | Val: {len(val_data)}\n")
+    print(f"Train: {len(train_data)} | Val: {len(val_data)}")
 
     # Model
     model = CamoXpert(3, 1, pretrained=True, backbone=args.backbone, num_experts=args.num_experts).cuda()
@@ -198,7 +180,7 @@ def train(args):
         model = enable_gradient_checkpointing(model)
 
     total, trainable = count_parameters(model)
-    print(f"Model: {total / 1e6:.1f}M params\n")
+    print(f"Parameters: {total/1e6:.1f}M ({trainable/1e6:.1f}M trainable)\n")
 
     criterion = AdvancedCODLoss(bce_weight=5.0, iou_weight=3.0, edge_weight=2.0, aux_weight=0.1)
     metrics = CODMetrics()
@@ -208,10 +190,10 @@ def train(args):
     best_iou = 0.0
     history = []
 
-    # Stage 1
-    print("=" * 70)
-    print("STAGE 1: DECODER TRAINING")
-    print("=" * 70)
+    # Stage 1: Decoder Training
+    print(f"\n{'='*70}")
+    print("STAGE 1: Decoder Training (backbone frozen)")
+    print(f"{'='*70}")
 
     for param in model.backbone.parameters():
         param.requires_grad = False
@@ -250,12 +232,12 @@ def train(args):
 
         history.append({'epoch': epoch, 'stage': 1, 'train_loss': train_loss, **val_metrics})
 
-    print(f"\n✓ Stage 1 Complete. Best IoU: {best_iou:.4f}\n")
+    print(f"\n✓ Stage 1 complete | Best IoU: {best_iou:.4f}\n")
 
-    # Stage 2
-    print("=" * 70)
-    print("STAGE 2: FULL FINE-TUNING")
-    print("=" * 70)
+    # Stage 2: Full Fine-tuning
+    print(f"{'='*70}")
+    print("STAGE 2: Full Fine-tuning (end-to-end)")
+    print(f"{'='*70}")
 
     for param in model.parameters():
         param.requires_grad = True
@@ -299,13 +281,10 @@ def train(args):
     with open(f"{args.checkpoint_dir}/history.json", 'w') as f:
         json.dump(history, f, indent=2)
 
-    print("\n" + "=" * 70)
-    print("TRAINING COMPLETE!")
-    print("=" * 70)
-    print(f"Best IoU: {best_iou:.4f}")
-    print(f"Target:   0.72")
-    print(f"Status:   {'✅ SOTA!' if best_iou >= 0.72 else f'Gap: {0.72 - best_iou:.4f}'}")
-    print("=" * 70)
+    print(f"\n{'='*70}")
+    print(f"Training Complete | Best IoU: {best_iou:.4f} | Target: 0.72")
+    print(f"Status: {'✅ SOTA Achieved!' if best_iou >= 0.72 else f'❌ Gap: {0.72 - best_iou:.4f}'}")
+    print(f"{'='*70}")
 
 
 if __name__ == '__main__':

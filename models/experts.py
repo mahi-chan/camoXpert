@@ -249,55 +249,33 @@ class MoELayer(nn.Module):
             nn.Conv2d(in_channels, num_experts, 1)
         )
 
-        print(f"✓ MoELayer initialized with {num_experts} experts, Top-{top_k} routing:")
-        for i, name in enumerate(self.expert_names, 1):
-            print(f"  {i}. {name}")
-        print(f"  → Computation: {top_k}/{num_experts} experts per input ({100 * top_k / num_experts:.1f}%)")
-
     def forward(self, x):
         """
-        FAST VECTORIZED Forward pass
-
-        Key optimization: Run ALL experts in parallel on entire batch,
-        then combine with gating weights (much faster than sequential)
+        Memory-efficient forward: Only run top-k experts per sample
+        Saves ~(num_experts - top_k) / num_experts memory (e.g., 5/7 = 71% savings for 7 experts, top-2)
         """
         B, C, H, W = x.shape
 
         # Compute gating scores [B, num_experts]
         gate_logits = self.gate(x).squeeze(-1).squeeze(-1)
-
-        # Get top-k routing
         top_k_logits, top_k_indices = torch.topk(gate_logits, self.top_k, dim=-1)
         top_k_weights = F.softmax(top_k_logits, dim=-1)  # [B, top_k]
 
-        # ================================================
-        # FAST PATH: Run all experts in parallel
-        # ================================================
-        # Stack all expert outputs [num_experts, B, C, H, W]
-        expert_outputs = []
-        for expert in self.experts:
-            expert_outputs.append(expert(x))
-        expert_outputs = torch.stack(expert_outputs, dim=0)  # [num_experts, B, C, H, W]
+        # Memory-efficient: Only run selected experts
+        output = torch.zeros_like(x)
+        expert_counts = torch.zeros(self.num_experts, device=x.device)
 
-        # Create routing mask [B, num_experts]
-        routing_mask = torch.zeros(B, self.num_experts, device=x.device)
         for b in range(B):
+            sample_output = torch.zeros_like(x[b:b+1])
             for k in range(self.top_k):
-                expert_idx = top_k_indices[b, k]
-                routing_mask[b, expert_idx] = top_k_weights[b, k]
+                expert_idx = top_k_indices[b, k].item()
+                expert_out = self.experts[expert_idx](x[b:b+1])
+                sample_output += top_k_weights[b, k] * expert_out
+                expert_counts[expert_idx] += 1
 
-        # Vectorized combination: [B, num_experts, 1, 1, 1] * [num_experts, B, C, H, W]
-        routing_mask = routing_mask.transpose(0, 1).unsqueeze(-1).unsqueeze(-1).unsqueeze(-1)
-        # [num_experts, B, 1, 1, 1]
-
-        # Weighted sum of expert outputs
-        output = (expert_outputs * routing_mask).sum(dim=0)  # [B, C, H, W]
+            output[b:b+1] = sample_output
 
         # Load balancing loss
-        expert_counts = torch.zeros(self.num_experts, device=x.device)
-        for expert_idx in range(self.num_experts):
-            expert_counts[expert_idx] = (top_k_indices == expert_idx).sum().float()
-
         expert_freq = expert_counts / (B * self.top_k + 1e-8)
         target_freq = torch.ones_like(expert_freq) / self.num_experts
         aux_loss = F.mse_loss(expert_freq, target_freq) * 0.01

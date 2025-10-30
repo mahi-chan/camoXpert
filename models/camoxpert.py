@@ -40,94 +40,51 @@ class CamoXpert(nn.Module):
         """
         super().__init__()
 
-        print("\n" + "="*70)
-        print("INITIALIZING CAMOXPERT")
-        print("="*70)
-        print(f"Backbone: {backbone}")
-
         self.num_experts = num_experts
         self.num_classes = num_classes
 
-        # ========================================
-        # 1. Backbone: EdgeNeXt
-        # ========================================
+        # Backbone
         self.backbone = self._create_backbone(backbone, pretrained)
-
-        # Dynamically detect feature dimensions from backbone
-        # This is more robust than hardcoding based on name strings
         self.feature_dims = self._detect_feature_dims()
 
-        print(f"Feature dimensions: {self.feature_dims}")
-
-        # ========================================
-        # 2. SDTA Enhancement Blocks
-        # ========================================
-        print("\nInitializing SDTA enhancement blocks...")
+        # SDTA Enhancement Blocks
         self.sdta_blocks = nn.ModuleList([
             SDTABlock(dim) for dim in self.feature_dims
         ])
-        print(f"✓ {len(self.sdta_blocks)} SDTA blocks created")
 
-        # ========================================
-        # 3. Mixture of Experts Layers
-        # ========================================
-        print("\nInitializing Mixture of Experts layers...")
+        # Mixture of Experts Layers
         from models.experts import MoELayer
-
-        top_k = max(2, num_experts // 2)  # Use half of experts, minimum 2
+        top_k = max(2, num_experts // 2)
 
         self.moe_layers = nn.ModuleList([
             MoELayer(dim, num_experts=num_experts, top_k=top_k)
             for dim in self.feature_dims
         ])
-        print(f"✓ {len(self.moe_layers)} MoE layers created")
 
-        # ========================================
-        # 4. Decoder
-        # ========================================
-        print("\nInitializing decoder...")
+        # Decoder
         self.decoder_blocks = nn.ModuleList([
-            DecoderBlock(self.feature_dims[3], self.feature_dims[2]),  # 584->288
-            DecoderBlock(self.feature_dims[2], self.feature_dims[1]),  # 288->160
-            DecoderBlock(self.feature_dims[1], self.feature_dims[0]),  # 160->80
-            DecoderBlock(self.feature_dims[0], 64),                    # 80->64
+            DecoderBlock(self.feature_dims[3], self.feature_dims[2]),
+            DecoderBlock(self.feature_dims[2], self.feature_dims[1]),
+            DecoderBlock(self.feature_dims[1], self.feature_dims[0]),
+            DecoderBlock(self.feature_dims[0], 64),
         ])
-        print(f"✓ {len(self.decoder_blocks)} decoder blocks created")
 
-        # ========================================
-        # 5. Deep Supervision Heads (output LOGITS)
-        # ========================================
+        # Deep Supervision Heads
         self.deep_heads = nn.ModuleList([
-            nn.Conv2d(self.feature_dims[2], num_classes, kernel_size=1),  # 288
-            nn.Conv2d(self.feature_dims[1], num_classes, kernel_size=1),  # 160
-            nn.Conv2d(self.feature_dims[0], num_classes, kernel_size=1),  # 80
+            nn.Conv2d(self.feature_dims[2], num_classes, kernel_size=1),
+            nn.Conv2d(self.feature_dims[1], num_classes, kernel_size=1),
+            nn.Conv2d(self.feature_dims[0], num_classes, kernel_size=1),
         ])
 
-        # ========================================
-        # 6. Final Prediction Head (output LOGITS)
-        # ========================================
+        # Final Prediction Head
         self.final_conv = nn.Sequential(
-            nn.Conv2d(64, 32, kernel_size=3, padding=1),
+            nn.Conv2d(64, 32, kernel_size=3, padding=1, bias=False),
             nn.BatchNorm2d(32),
             nn.ReLU(inplace=True),
             nn.Conv2d(32, num_classes, kernel_size=1)
-            # NO SIGMOID - Loss function handles it
         )
 
-        # ========================================
-        # Summary
-        # ========================================
-        print("\n" + "="*70)
-        print("CamoXpert Architecture Summary:")
-        print("="*70)
-        print(f"  Backbone:        {backbone}")
-        print(f"  Expert Count:    {num_experts} (Top-{top_k} selection per sample)")
-        print(f"  Encoder Stages:  {len(self.feature_dims)}")
-        print(f"  Decoder Stages:  {len(self.decoder_blocks)}")
-        print(f"  Deep Supervision: Enabled ({len(self.deep_heads)} heads)")
-        print(f"  Output:          LOGITS (no sigmoid)")
-        print("="*70)
-        print()
+        print(f"✓ CamoXpert: {backbone} | {num_experts} experts (top-{top_k}) | {self.feature_dims}")
 
     def _create_backbone(self, backbone: str, pretrained: bool):
         """Create EdgeNeXt backbone"""
@@ -158,134 +115,76 @@ class CamoXpert(nn.Module):
         return feature_dims
 
     def forward(self, x, return_deep_supervision=False):
-        """
-        Forward pass through CamoXpert
-
-        Args:
-            x: Input images [B, 3, H, W]
-            return_deep_supervision: Whether to return intermediate predictions
-
-        Returns:
-            pred: Final prediction LOGITS [B, 1, H, W] (no sigmoid applied)
-            aux_loss: Auxiliary MoE load balancing loss
-            deep_outputs: List of deep supervision LOGITS (if enabled) or None
-        """
-
+        """Forward pass - returns logits (no sigmoid)"""
         B, _, H, W = x.shape
 
-        # ========================================
-        # 1. Encoder: Extract multi-scale features
-        # ========================================
+        # Encoder: Extract multi-scale features
         encoder_features = self.backbone(x)
 
-        # encoder_features is a list: [f1, f2, f3, f4]
-        # Typical shapes for img_size=288:
-        #   f1: [B, 80, 72, 72]
-        #   f2: [B, 160, 36, 36]
-        #   f3: [B, 288, 18, 18]
-        #   f4: [B, 584, 9, 9]
-
-        # ========================================
-        # 2. Enhancement: Apply SDTA + MoE
-        # ========================================
+        # Enhancement: Apply SDTA + MoE
         enhanced_features = []
         total_aux_loss = 0.0
 
-        for i, (feat, sdta, moe) in enumerate(zip(
-            encoder_features,
-            self.sdta_blocks,
-            self.moe_layers
-        )):
-            # Apply SDTA enhancement
+        for feat, sdta, moe in zip(encoder_features, self.sdta_blocks, self.moe_layers):
             feat = sdta(feat)
-
-            # Apply MoE with experts
-            # Returns: enhanced_feat, aux_loss, routing_info
-            feat, aux_loss, routing_info = moe(feat)
-
-            # Accumulate auxiliary loss
+            feat, aux_loss, _ = moe(feat)
             if aux_loss is not None:
                 total_aux_loss += aux_loss
-
             enhanced_features.append(feat)
 
-        # enhanced_features[0] = f1_enhanced [B, 80, 72, 72]
-        # enhanced_features[1] = f2_enhanced [B, 160, 36, 36]
-        # enhanced_features[2] = f3_enhanced [B, 288, 18, 18]
-        # enhanced_features[3] = f4_enhanced [B, 584, 9, 9]
-
-        # ========================================
-        # 3. Decoder: Progressive upsampling
-        # ========================================
+        # Decoder: Progressive upsampling with deep supervision
         deep_outputs = [] if return_deep_supervision else None
 
-        # Start with deepest features
-        x4 = enhanced_features[3]  # [B, 584, 9, 9]
-
-        # Decode stage 4 -> 3
-        x3 = self.decoder_blocks[0](x4, enhanced_features[2])  # [B, 288, 18, 18]
+        x4 = enhanced_features[3]
+        x3 = self.decoder_blocks[0](x4, enhanced_features[2])
         if return_deep_supervision:
-            deep_pred = self.deep_heads[0](x3)  # LOGITS [B, 1, 18, 18]
-            deep_outputs.append(deep_pred)
+            deep_outputs.append(self.deep_heads[0](x3))
 
-        # Decode stage 3 -> 2
-        x2 = self.decoder_blocks[1](x3, enhanced_features[1])  # [B, 160, 36, 36]
+        x2 = self.decoder_blocks[1](x3, enhanced_features[1])
         if return_deep_supervision:
-            deep_pred = self.deep_heads[1](x2)  # LOGITS [B, 1, 36, 36]
-            deep_outputs.append(deep_pred)
+            deep_outputs.append(self.deep_heads[1](x2))
 
-        # Decode stage 2 -> 1
-        x1 = self.decoder_blocks[2](x2, enhanced_features[0])  # [B, 80, 72, 72]
+        x1 = self.decoder_blocks[2](x2, enhanced_features[0])
         if return_deep_supervision:
-            deep_pred = self.deep_heads[2](x1)  # LOGITS [B, 1, 72, 72]
-            deep_outputs.append(deep_pred)
+            deep_outputs.append(self.deep_heads[2](x1))
 
-        # Decode stage 1 -> output
-        x0 = self.decoder_blocks[3](x1, None)  # [B, 64, 144, 144]
-
-        # Upsample to original size
+        x0 = self.decoder_blocks[3](x1, None)
         x0_up = F.interpolate(x0, size=(H, W), mode='bilinear', align_corners=False)
 
-        # ========================================
-        # 4. Final prediction (RETURN LOGITS)
-        # ========================================
-        pred = self.final_conv(x0_up)  # [B, 1, H, W] - LOGITS
+        # Final prediction (logits)
+        pred = self.final_conv(x0_up)
 
-        # DO NOT APPLY SIGMOID HERE
-        # The loss function (BCEWithLogitsLoss) will handle it
-
-        # ========================================
-        # 5. Return outputs
-        # ========================================
-        if return_deep_supervision:
-            return pred, total_aux_loss, deep_outputs
-        else:
-            return pred, total_aux_loss, None
+        return pred, total_aux_loss, deep_outputs
 
 
 class SDTABlock(nn.Module):
     """
-    Selective Dual-axis Temporal Attention Block
-    Enhances features with spatial attention mechanism
+    Optimized Selective Dual-axis Temporal Attention
+    Memory-efficient with depthwise separable convolutions
     """
 
     def __init__(self, dim, reduction=8):
         super().__init__()
 
+        # Channel attention (lightweight)
         self.channel_attention = nn.Sequential(
             nn.AdaptiveAvgPool2d(1),
-            nn.Conv2d(dim, dim // reduction, 1),
+            nn.Conv2d(dim, max(dim // reduction, 8), 1, bias=False),
             nn.ReLU(inplace=True),
-            nn.Conv2d(dim // reduction, dim, 1),
+            nn.Conv2d(max(dim // reduction, 8), dim, 1, bias=False),
             nn.Sigmoid()
         )
 
+        # Spatial attention (depthwise for efficiency)
         self.spatial_attention = nn.Sequential(
-            nn.Conv2d(dim, 1, kernel_size=7, padding=3),
+            nn.Conv2d(dim, dim, kernel_size=5, padding=2, groups=dim, bias=False),
+            nn.Conv2d(dim, 1, kernel_size=1, bias=False),
             nn.Sigmoid()
         )
 
     def forward(self, x):
+        identity = x
+
         # Channel attention
         ca = self.channel_attention(x)
         x = x * ca
@@ -294,7 +193,8 @@ class SDTABlock(nn.Module):
         sa = self.spatial_attention(x)
         x = x * sa
 
-        return x
+        # Residual connection
+        return x + identity * 0.1
 
 
 class DecoderBlock(nn.Module):
