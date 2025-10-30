@@ -150,6 +150,9 @@ def train_epoch(model, loader, criterion, optimizer, scaler, accumulation_steps,
     epoch_loss = 0
     optimizer.zero_grad(set_to_none=True)
 
+    # Clear cache at start of epoch to prevent fragmentation
+    torch.cuda.empty_cache()
+
     pbar = tqdm(enumerate(loader), total=len(loader), desc=f"Epoch {epoch + 1}/{total_epochs}")
 
     for batch_idx, (images, masks) in pbar:
@@ -201,12 +204,26 @@ def train_epoch(model, loader, criterion, optimizer, scaler, accumulation_steps,
 @torch.no_grad()
 def validate(model, loader, metrics, expert_tracker=None):
     model.eval()
+
+    # Clear cache before validation
+    torch.cuda.empty_cache()
+
     all_metrics = []
     for images, masks in tqdm(loader, desc="Validating", leave=False):
-        images, masks = images.cuda(), masks.cuda()
+        images, masks = images.cuda(non_blocking=True), masks.cuda(non_blocking=True)
         pred, _, _ = model(images)
         pred = torch.sigmoid(pred)
-        all_metrics.append(metrics.compute_all(pred, masks))
+
+        # Compute metrics and move to CPU immediately
+        batch_metrics = metrics.compute_all(pred, masks)
+        all_metrics.append(batch_metrics)
+
+        # Clear GPU memory of this batch
+        del pred, images, masks
+
+    # Clear cache after validation
+    torch.cuda.empty_cache()
+
     return {k: np.mean([m[k] for m in all_metrics]) for k in all_metrics[0]}
 
 
@@ -236,6 +253,9 @@ def analyze_expert_routing(model, loader, num_batches=10):
 def train(args):
     set_seed(args.seed)
     device = torch.device(args.device)
+
+    # Memory management: Prevent fragmentation
+    os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
 
     # Performance optimizations
     torch.backends.cudnn.benchmark = True  # Auto-tune kernels for your input size
@@ -282,12 +302,12 @@ def train(args):
     # Model
     model = CamoXpert(3, 1, pretrained=True, backbone=args.backbone, num_experts=args.num_experts).cuda()
 
-    # Only use gradient checkpointing if memory is tight (batch < 8)
-    if args.gradient_checkpointing and args.batch_size < 8:
+    # Enable gradient checkpointing if requested
+    if args.gradient_checkpointing:
         model = enable_gradient_checkpointing(model)
-        print("⚠️  Gradient checkpointing enabled (trades 30% speed for memory)")
-    elif args.gradient_checkpointing and args.batch_size >= 8:
-        print(f"ℹ️  Skipping gradient checkpointing (batch_size={args.batch_size} has plenty of memory)")
+        print(f"✓ Gradient checkpointing enabled (saves 30-40% memory, ~20% slower)")
+    else:
+        print(f"ℹ️  Gradient checkpointing disabled (use --gradient-checkpointing if OOM)")
 
     total, trainable = count_parameters(model)
     print(f"Parameters: {total/1e6:.1f}M ({trainable/1e6:.1f}M trainable)")
