@@ -89,12 +89,12 @@ def test_model_with_flash_attention(dataset_path, checkpoint_path=None, num_samp
 
     # Test with Flash Attention enabled
     print("\n1️⃣  Creating model with Flash Attention ENABLED...")
-    model_flash = CamoXpert(3, 1, pretrained=False, backbone='edgenext_base', num_experts=7).cuda()
+    model_flash = CamoXpert(in_channels=3, num_classes=1, pretrained=False, backbone='edgenext_base', num_experts=7).cuda()
     model_flash.eval()
 
     # Test with Flash Attention disabled
     print("\n2️⃣  Creating model with Flash Attention DISABLED...")
-    model_std = CamoXpert(3, 1, pretrained=False, backbone='edgenext_base', num_experts=7).cuda()
+    model_std = CamoXpert(in_channels=3, num_classes=1, pretrained=False, backbone='edgenext_base', num_experts=7).cuda()
 
     # Disable Flash Attention in all SDTAEncoder modules
     for module in model_std.modules():

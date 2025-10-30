@@ -409,7 +409,7 @@ def main():
 
     # Create model
     print("Loading model...")
-    model = CamoXpert(3, 1, pretrained=True, backbone=args.backbone,
+    model = CamoXpert(in_channels=3, num_classes=1, pretrained=True, backbone=args.backbone,
                       num_experts=args.num_experts)
 
     # Load checkpoint if provided

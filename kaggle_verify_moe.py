@@ -264,7 +264,7 @@ def main():
     print("Creating CamoXpert model...")
     model = CamoXpert(
         in_channels=3,
-        out_channels=1,
+        num_classes=1,  # Fixed: use num_classes instead of out_channels
         pretrained=False,  # Don't need pretrained weights for verification
         backbone='edgenext_base',
         num_experts=7

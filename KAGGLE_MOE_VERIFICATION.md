@@ -63,7 +63,7 @@ print(f"Compute capability: {capability[0]}.{capability[1]}")
 
 # ----- LOAD MODEL -----
 print("\n📦 Loading model...")
-model = CamoXpert(3, 1, pretrained=False, backbone='edgenext_base', num_experts=7).cuda()
+model = CamoXpert(in_channels=3, num_classes=1, pretrained=False, backbone='edgenext_base', num_experts=7).cuda()
 
 if CHECKPOINT_PATH:
     checkpoint = torch.load(CHECKPOINT_PATH, map_location='cpu')
