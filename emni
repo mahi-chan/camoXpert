@@ -56,11 +56,11 @@ class CamoXpert(nn.Module):
         # Get feature dimensions from backbone
         # EdgeNeXt outputs 4 stages with different channel dimensions
         if 'small' in backbone:
-            self.feature_dims = [80, 192, 384, 768]
+            self.feature_dims = [48, 96, 160, 304]
         elif 'base' in backbone:
-            self.feature_dims = [128, 256, 512, 1024]
+            self.feature_dims = [80, 160, 288, 584]
         else:
-            self.feature_dims = [128, 256, 512, 1024]
+            self.feature_dims = [80, 160, 288, 584]
 
         print(f"Feature dimensions: {self.feature_dims}")
 
