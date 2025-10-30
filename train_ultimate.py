@@ -76,22 +76,32 @@ class EMA:
 
 
 def enable_gradient_checkpointing(model):
+    """
+    Enable gradient checkpointing for memory-intensive modules.
+    Only checkpoint MoE layers as they are the most memory-intensive.
+    SDTA blocks are lightweight and checkpointing them causes issues.
+    """
     print("🔧 Enabling gradient checkpointing...")
     checkpointed = 0
+
+    # Only checkpoint MoE layers, not SDTA
     for name, module in model.named_modules():
-        if 'moe' in name.lower() or 'sdta' in name.lower():
-            if hasattr(module, 'forward'):
+        if 'moe' in name.lower() and hasattr(module, '__class__'):
+            # Check if it's an MoELayer module
+            if module.__class__.__name__ == 'MoELayer':
+                # Store original forward
                 original_forward = module.forward
 
-                def checkpointed_forward(self, *args, **kwargs):
-                    def custom_forward(*inputs):
-                        return original_forward(*inputs, **kwargs)
+                def create_checkpoint_wrapper(orig_forward):
+                    def wrapper(x):
+                        # Use gradient checkpointing for this module
+                        return gradient_checkpoint(orig_forward, x, use_reentrant=False)
+                    return wrapper
 
-                    return gradient_checkpoint(custom_forward, *args, use_reentrant=False)
-
-                module.forward = checkpointed_forward.__get__(module, type(module))
+                module.forward = create_checkpoint_wrapper(original_forward)
                 checkpointed += 1
-    print(f"✓ Checkpointed {checkpointed} modules")
+
+    print(f"✓ Checkpointed {checkpointed} MoE modules")
     return model
 
 
