@@ -53,14 +53,9 @@ class CamoXpert(nn.Module):
         # ========================================
         self.backbone = self._create_backbone(backbone, pretrained)
 
-        # Get feature dimensions from backbone
-        # EdgeNeXt outputs 4 stages with different channel dimensions
-        if 'small' in backbone:
-            self.feature_dims = [80, 192, 384, 768]
-        elif 'base' in backbone:
-            self.feature_dims = [128, 256, 512, 1024]
-        else:
-            self.feature_dims = [128, 256, 512, 1024]
+        # Dynamically detect feature dimensions from backbone
+        # This is more robust than hardcoding based on name strings
+        self.feature_dims = self._detect_feature_dims()
 
         print(f"Feature dimensions: {self.feature_dims}")
 
@@ -151,6 +146,16 @@ class CamoXpert(nn.Module):
             else:
                 model = timm.create_model('edgenext_base', pretrained=pretrained, features_only=True)
             return model
+
+    def _detect_feature_dims(self):
+        """Dynamically detect feature dimensions by running a dummy forward pass"""
+        self.backbone.eval()
+        with torch.no_grad():
+            dummy_input = torch.randn(1, 3, 224, 224)
+            features = self.backbone(dummy_input)
+            feature_dims = [f.shape[1] for f in features]
+        self.backbone.train()
+        return feature_dims
 
     def forward(self, x, return_deep_supervision=False):
         """
