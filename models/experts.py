@@ -297,10 +297,11 @@ class MoELayer(nn.Module):
     - Multi-scale features
     """
 
-    def __init__(self, in_channels, num_experts=5, top_k=2):
+    def __init__(self, in_channels, num_experts=5, top_k=2, debug_mode=True):
         super().__init__()
         self.num_experts = num_experts
         self.top_k = min(top_k, num_experts)
+        self.debug_mode = debug_mode  # Enable verification checks
 
         # Create experts
         expert_classes = [
@@ -333,9 +334,22 @@ class MoELayer(nn.Module):
         # Smart routing: Gate analyzes image content
         gate_logits = self.gate(x)  # [B, num_experts]
 
+        # Verification: Check gate outputs are valid (only in debug mode)
+        if self.debug_mode:
+            assert not torch.isnan(gate_logits).any(), "❌ NaN detected in gate logits"
+            assert not torch.isinf(gate_logits).any(), "❌ Inf detected in gate logits"
+
         # Select top-k experts per image
         top_k_logits, top_k_indices = torch.topk(gate_logits, self.top_k, dim=-1)
         top_k_weights = F.softmax(top_k_logits, dim=-1)  # [B, top_k]
+
+        # Verification: Check weights are valid (only in debug mode)
+        if self.debug_mode:
+            assert torch.allclose(top_k_weights.sum(dim=1), torch.ones(B, device=x.device), atol=1e-5), \
+                f"❌ Weights don't sum to 1.0: {top_k_weights.sum(dim=1)[0].item()}"
+            assert (top_k_weights >= 0).all(), "❌ Negative weights detected"
+            assert (top_k_indices >= 0).all() and (top_k_indices < self.num_experts).all(), \
+                "❌ Expert indices out of valid range"
 
         # VECTORIZED: Group samples by expert and process in batches
         output = torch.zeros_like(x)
@@ -364,6 +378,12 @@ class MoELayer(nn.Module):
                     weight = top_k_weights[sample_idx, k_idx]
                     output[sample_idx] += weight * expert_output[i]
                     expert_counts[expert_idx] += 1
+
+        # Verification: Check output is valid (only in debug mode)
+        if self.debug_mode:
+            assert not torch.isnan(output).any(), "❌ NaN detected in MoE output"
+            assert not torch.isinf(output).any(), "❌ Inf detected in MoE output"
+            assert output.abs().sum() > 1e-6, "❌ MoE output is all zeros - experts may not be firing"
 
         # Soft load balancing
         expert_freq = expert_counts / (B * self.top_k + 1e-8)
