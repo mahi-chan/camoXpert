@@ -349,7 +349,7 @@ class MoELayer(nn.Module):
                 continue
 
             # Get samples and their weights for this expert
-            sample_indices = mask.nonzero(squeeze_dim=True)
+            sample_indices = mask.nonzero(as_tuple=False).squeeze(1)
             expert_input = x[sample_indices]
 
             # Run expert on all selected samples at once (PARALLEL!)
@@ -358,7 +358,7 @@ class MoELayer(nn.Module):
             # Distribute outputs back with weights
             for i, sample_idx in enumerate(sample_indices):
                 # Find weight for this expert in this sample
-                expert_positions = (top_k_indices[sample_idx] == expert_idx).nonzero(squeeze_dim=True)
+                expert_positions = (top_k_indices[sample_idx] == expert_idx).nonzero(as_tuple=False).squeeze(1)
                 if expert_positions.numel() > 0:
                     k_idx = expert_positions[0].item()
                     weight = top_k_weights[sample_idx, k_idx]
