@@ -43,8 +43,8 @@ def parse_args():
     parser.add_argument('--gradient-checkpointing', action='store_true', default=False)
     parser.add_argument('--use-ema', action='store_true', default=False)
     parser.add_argument('--device', type=str, default='cuda')
-    parser.add_argument('--num-workers', type=int, default=8,
-                        help='Data loading workers (recommend: num_cpu_cores or batch_size)')
+    parser.add_argument('--num-workers', type=int, default=4,
+                        help='Data loading workers (4 for Kaggle, 8+ for local)')
     parser.add_argument('--seed', type=int, default=42)
 
     return parser.parse_args()
@@ -290,13 +290,21 @@ def train(args):
     total, trainable = count_parameters(model)
     print(f"Parameters: {total/1e6:.1f}M ({trainable/1e6:.1f}M trainable)")
 
-    # Compile model for faster execution (PyTorch 2.0+)
+    # Compile model for faster execution (PyTorch 2.0+ with CUDA >= 7.0)
     try:
-        print("Compiling model with torch.compile for faster execution...")
-        model = torch.compile(model, mode='reduce-overhead')
-        print("✓ Model compiled successfully")
+        # Check if GPU supports torch.compile (requires CUDA Capability >= 7.0)
+        cuda_capability = torch.cuda.get_device_capability()
+        if cuda_capability[0] >= 7:
+            print(f"Compiling model with torch.compile (GPU CUDA {cuda_capability[0]}.{cuda_capability[1]})...")
+            model = torch.compile(model, mode='reduce-overhead')
+            print("✓ Model compiled successfully")
+        else:
+            print(f"⚠️  GPU CUDA capability {cuda_capability[0]}.{cuda_capability[1]} < 7.0")
+            print(f"⚠️  torch.compile not supported, using eager mode")
+            print(f"⚠️  Recommendation: Switch to T4 GPU (CUDA 7.5) for 20-30% speedup")
     except Exception as e:
-        print(f"⚠️  torch.compile not available: {e}")
+        print(f"⚠️  torch.compile failed: {e}")
+        print(f"⚠️  Continuing with eager mode")
     print()
 
     criterion = AdvancedCODLoss(bce_weight=5.0, iou_weight=3.0, edge_weight=2.0, aux_weight=0.1)
