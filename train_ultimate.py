@@ -21,6 +21,7 @@ from data.dataset import COD10KDataset
 from losses.advanced_loss import AdvancedCODLoss
 from metrics.cod_metrics import CODMetrics
 from models.utils import set_seed
+from collections import defaultdict
 
 
 def parse_args():
@@ -75,6 +76,50 @@ class EMA:
                 param.data = self.backup[name]
 
 
+class ExpertUsageTracker:
+    """Track which experts are being selected for images"""
+    def __init__(self):
+        self.expert_usage = defaultdict(int)
+        self.total_selections = 0
+
+    def update(self, routing_info):
+        """Update with routing info from MoE layer"""
+        if routing_info and 'expert_counts' in routing_info:
+            counts = routing_info['expert_counts'].cpu().numpy()
+            names = routing_info.get('expert_names', [f'Expert_{i}' for i in range(len(counts))])
+            for name, count in zip(names, counts):
+                self.expert_usage[name] += int(count)
+                self.total_selections += int(count)
+
+    def get_stats(self):
+        """Get expert usage statistics"""
+        if self.total_selections == 0:
+            return {}
+        stats = {}
+        for name, count in self.expert_usage.items():
+            stats[name] = {
+                'count': count,
+                'percentage': 100 * count / self.total_selections
+            }
+        return stats
+
+    def print_stats(self):
+        """Print expert usage statistics"""
+        stats = self.get_stats()
+        if not stats:
+            return
+        print("\n📊 Expert Usage Statistics:")
+        sorted_experts = sorted(stats.items(), key=lambda x: x[1]['count'], reverse=True)
+        for name, data in sorted_experts:
+            bar = '█' * int(data['percentage'] / 2)
+            print(f"  {name:25s}: {data['count']:5d} ({data['percentage']:5.1f}%) {bar}")
+
+    def reset(self):
+        """Reset statistics"""
+        self.expert_usage.clear()
+        self.total_selections = 0
+
+
 def enable_gradient_checkpointing(model):
     """Enable gradient checkpointing for MoE layers (memory-intensive)"""
     checkpointed = 0
@@ -97,7 +142,7 @@ def enable_gradient_checkpointing(model):
 
 
 def train_epoch(model, loader, criterion, optimizer, scaler, accumulation_steps, ema, epoch, total_epochs,
-                use_deep_sup):
+                use_deep_sup, expert_tracker=None):
     model.train()
     epoch_loss = 0
     optimizer.zero_grad(set_to_none=True)
@@ -138,7 +183,7 @@ def train_epoch(model, loader, criterion, optimizer, scaler, accumulation_steps,
 
 
 @torch.no_grad()
-def validate(model, loader, metrics):
+def validate(model, loader, metrics, expert_tracker=None):
     model.eval()
     all_metrics = []
     for images, masks in tqdm(loader, desc="Validating", leave=False):
@@ -147,6 +192,29 @@ def validate(model, loader, metrics):
         pred = torch.sigmoid(pred)
         all_metrics.append(metrics.compute_all(pred, masks))
     return {k: np.mean([m[k] for m in all_metrics]) for k in all_metrics[0]}
+
+
+@torch.no_grad()
+def analyze_expert_routing(model, loader, num_batches=10):
+    """Analyze which experts are being selected for validation images"""
+    model.eval()
+    tracker = ExpertUsageTracker()
+
+    for batch_idx, (images, _) in enumerate(loader):
+        if batch_idx >= num_batches:
+            break
+        images = images.cuda()
+
+        # Forward pass through model to collect routing info
+        # We need to access MoE layers directly
+        features = model.backbone(images)
+        for feat, sdta, moe in zip(features, model.sdta_blocks, model.moe_layers):
+            feat = sdta(feat)
+            _, _, routing_info = moe(feat)
+            tracker.update(routing_info)
+
+    tracker.print_stats()
+    return tracker
 
 
 def train(args):
@@ -219,6 +287,14 @@ def train(args):
 
         print(f"Loss: {train_loss:.4f} | IoU: {val_metrics['IoU']:.4f} | Dice: {val_metrics['Dice_Score']:.4f}")
 
+        # Analyze expert routing every 10 epochs
+        if (epoch + 1) % 10 == 0:
+            print(f"\n{'='*70}")
+            print(f"Expert Routing Analysis (Epoch {epoch + 1})")
+            print(f"{'='*70}")
+            analyze_expert_routing(model, val_loader, num_batches=20)
+            print(f"{'='*70}\n")
+
         if val_metrics['IoU'] > best_iou:
             best_iou = val_metrics['IoU']
             torch.save({
@@ -264,6 +340,14 @@ def train(args):
             ema.restore()
 
         print(f"Loss: {train_loss:.4f} | IoU: {val_metrics['IoU']:.4f} | Dice: {val_metrics['Dice_Score']:.4f}")
+
+        # Analyze expert routing every 10 epochs
+        if (epoch + 1) % 10 == 0:
+            print(f"\n{'='*70}")
+            print(f"Expert Routing Analysis (Epoch {epoch + 1})")
+            print(f"{'='*70}")
+            analyze_expert_routing(model, val_loader, num_batches=20)
+            print(f"{'='*70}\n")
 
         if val_metrics['IoU'] > best_iou:
             best_iou = val_metrics['IoU']

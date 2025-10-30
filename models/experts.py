@@ -219,8 +219,83 @@ class ContrastExpert(nn.Module):
         return self.fusion(local_contrast) + x
 
 
+class ContentAwareGate(nn.Module):
+    """
+    Smart routing network that analyzes image content to select best experts
+
+    Examines:
+    1. Spatial patterns (edges, textures) via spatial attention
+    2. Channel statistics (global semantics) via channel attention
+    3. Multi-level aggregation for robust routing decisions
+
+    This helps the router learn: "Image with strong edges → use EdgeExpert"
+    """
+    def __init__(self, in_channels, num_experts):
+        super().__init__()
+
+        # Branch 1: Spatial pattern analysis (local features)
+        self.spatial_branch = nn.Sequential(
+            nn.Conv2d(in_channels, in_channels // 4, 3, padding=1, groups=in_channels // 4),
+            nn.GELU(),
+            nn.AdaptiveAvgPool2d(1),
+            nn.Flatten()
+        )
+
+        # Branch 2: Channel statistics (global semantics)
+        self.channel_branch = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1),
+            nn.Flatten(),
+            nn.Linear(in_channels, in_channels // 4),
+            nn.GELU()
+        )
+
+        # Branch 3: Max pooling (captures salient features)
+        self.max_branch = nn.Sequential(
+            nn.AdaptiveMaxPool2d(1),
+            nn.Flatten(),
+            nn.Linear(in_channels, in_channels // 4),
+            nn.GELU()
+        )
+
+        # Fusion: Combine all branches to make routing decision
+        total_features = (in_channels // 4) * 3
+        self.fusion = nn.Sequential(
+            nn.Linear(total_features, in_channels // 2),
+            nn.GELU(),
+            nn.Dropout(0.1),  # Prevent overfitting to specific experts
+            nn.Linear(in_channels // 2, num_experts)
+        )
+
+    def forward(self, x):
+        """
+        Args:
+            x: Input features [B, C, H, W]
+        Returns:
+            gate_logits: Expert selection scores [B, num_experts]
+        """
+        # Analyze image from multiple perspectives
+        spatial_features = self.spatial_branch(x)   # Local patterns
+        channel_features = self.channel_branch(x)   # Global semantics
+        max_features = self.max_branch(x)           # Salient features
+
+        # Combine all views
+        combined = torch.cat([spatial_features, channel_features, max_features], dim=1)
+
+        # Make routing decision
+        gate_logits = self.fusion(combined)
+
+        return gate_logits
+
+
 class MoELayer(nn.Module):
-    """FAST Mixture of Experts - Vectorized Implementation"""
+    """
+    Intelligent Mixture of Experts with Content-Aware Routing
+
+    The router learns which experts work best for each image by analyzing:
+    - Spatial patterns (edges, textures)
+    - Channel statistics (global context)
+    - Multi-scale features
+    """
 
     def __init__(self, in_channels, num_experts=5, top_k=2):
         super().__init__()
@@ -243,25 +318,29 @@ class MoELayer(nn.Module):
             self.experts.append(expert_classes[i % len(expert_classes)](in_channels))
             self.expert_names.append(expert_names[i % len(expert_names)])
 
-        # Gating network
-        self.gate = nn.Sequential(
-            nn.AdaptiveAvgPool2d(1),
-            nn.Conv2d(in_channels, num_experts, 1)
-        )
+        # Smart Gating Network: Analyzes image content to select best experts
+        self.gate = ContentAwareGate(in_channels, num_experts)
 
     def forward(self, x):
         """
-        Memory-efficient forward: Only run top-k experts per sample
-        Saves ~(num_experts - top_k) / num_experts memory (e.g., 5/7 = 71% savings for 7 experts, top-2)
+        Image-specific expert routing: Each image selects its best experts
+
+        For each image:
+        1. Gate analyzes image content
+        2. Selects top-k most suitable experts
+        3. Runs only selected experts
+        4. Combines outputs with learned weights
         """
         B, C, H, W = x.shape
 
-        # Compute gating scores [B, num_experts]
-        gate_logits = self.gate(x).squeeze(-1).squeeze(-1)
+        # Smart routing: Gate analyzes image content
+        gate_logits = self.gate(x)  # [B, num_experts]
+
+        # Select top-k experts per image
         top_k_logits, top_k_indices = torch.topk(gate_logits, self.top_k, dim=-1)
         top_k_weights = F.softmax(top_k_logits, dim=-1)  # [B, top_k]
 
-        # Memory-efficient: Only run selected experts
+        # Run only selected experts (memory efficient)
         output = torch.zeros_like(x)
         expert_counts = torch.zeros(self.num_experts, device=x.device)
 
@@ -275,14 +354,17 @@ class MoELayer(nn.Module):
 
             output[b:b+1] = sample_output
 
-        # Load balancing loss
+        # Soft load balancing: Allow specialization but prevent dead experts
+        # Reduced from 0.01 to 0.001 to allow more specialization
         expert_freq = expert_counts / (B * self.top_k + 1e-8)
         target_freq = torch.ones_like(expert_freq) / self.num_experts
-        aux_loss = F.mse_loss(expert_freq, target_freq) * 0.01
+        aux_loss = F.mse_loss(expert_freq, target_freq) * 0.001
 
         routing_info = {
             'top_k_indices': top_k_indices.detach(),
-            'top_k_weights': top_k_weights.detach()
+            'top_k_weights': top_k_weights.detach(),
+            'expert_counts': expert_counts.detach(),
+            'expert_names': [self.expert_names[i] for i in range(self.num_experts)]
         }
 
         return output, aux_loss, routing_info
