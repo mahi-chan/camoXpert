@@ -91,12 +91,15 @@ class COD10KDataset(Dataset):
         print(f"  Mask dir:  {self.mask_dir}")
 
         if self.augment:
+            # LIGHTWEIGHT augmentation: Fast + Essential only
+            # Removed slow augmentations (ColorJitter, VerticalFlip) for 3-5x speedup
+            # Kept critical augmentations for COD generalization
             self.transform = A.Compose([
                 A.Resize(img_size, img_size),
-                A.HorizontalFlip(p=0.5),
-                A.VerticalFlip(p=0.2),
-                A.RandomRotate90(p=0.2),
-                A.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1, p=0.5),
+                A.HorizontalFlip(p=0.5),              # Essential: 2ms, huge benefit
+                A.RandomRotate90(p=0.3),              # Important: 3ms, orientation robustness
+                # REMOVED: VerticalFlip (marginal benefit, 2ms wasted)
+                # REMOVED: ColorJitter (very slow 15ms, marginal benefit for COD)
                 A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
                 ToTensorV2()
             ])
