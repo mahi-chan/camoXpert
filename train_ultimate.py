@@ -48,6 +48,10 @@ def parse_args():
                         help='Batch size for stage 2 (default: same as --batch-size)')
     parser.add_argument('--progressive-unfreeze', action='store_true', default=False,
                         help='Gradually unfreeze backbone layers in stage 2')
+    parser.add_argument('--resume-from', type=str, default=None,
+                        help='Path to checkpoint to resume from')
+    parser.add_argument('--skip-stage1', action='store_true', default=False,
+                        help='Skip stage 1 and go directly to stage 2 (use with --resume-from)')
 
     return parser.parse_args()
 
@@ -270,58 +274,93 @@ def train(args):
 
     best_iou = 0.0
     history = []
+    start_epoch = 0
+
+    # Load checkpoint if resuming
+    if args.resume_from:
+        print(f"\n{'='*70}")
+        print(f"LOADING CHECKPOINT: {args.resume_from}")
+        print(f"{'='*70}")
+        if not os.path.exists(args.resume_from):
+            print(f"❌ ERROR: Checkpoint not found at {args.resume_from}")
+            return
+
+        checkpoint = torch.load(args.resume_from, map_location='cuda')
+        model.load_state_dict(checkpoint['model_state_dict'])
+
+        if ema and checkpoint.get('ema_state_dict'):
+            ema.shadow = checkpoint['ema_state_dict']
+
+        best_iou = checkpoint.get('best_iou', 0.0)
+        start_epoch = checkpoint.get('epoch', 0) + 1
+
+        print(f"✓ Loaded checkpoint from epoch {checkpoint.get('epoch', 0)}")
+        print(f"✓ Best IoU so far: {best_iou:.4f}")
+        print(f"✓ Resuming from epoch {start_epoch}")
+
+        if args.skip_stage1 and start_epoch < args.stage1_epochs:
+            print(f"⚠️  WARNING: Checkpoint is from epoch {checkpoint.get('epoch', 0)} (Stage 1)")
+            print(f"   You requested --skip-stage1, jumping to epoch {args.stage1_epochs}")
+            start_epoch = args.stage1_epochs
+
+        print(f"{'='*70}\n")
 
     # Stage 1
-    print("=" * 70)
-    print("STAGE 1: DECODER TRAINING")
-    print("=" * 70)
+    if start_epoch < args.stage1_epochs:
+        print("=" * 70)
+        print("STAGE 1: DECODER TRAINING")
+        print("=" * 70)
 
-    for param in model.backbone.parameters():
-        param.requires_grad = False
+        for param in model.backbone.parameters():
+            param.requires_grad = False
 
-    optimizer = AdamW(filter(lambda p: p.requires_grad, model.parameters()),
-                      lr=args.lr, weight_decay=args.weight_decay)
+        optimizer = AdamW(filter(lambda p: p.requires_grad, model.parameters()),
+                          lr=args.lr, weight_decay=args.weight_decay)
 
-    total_steps = len(train_loader) * args.stage1_epochs // args.accumulation_steps
-    scheduler = OneCycleLR(optimizer, max_lr=args.lr, total_steps=total_steps, pct_start=0.1)
+        total_steps = len(train_loader) * args.stage1_epochs // args.accumulation_steps
+        scheduler = OneCycleLR(optimizer, max_lr=args.lr, total_steps=total_steps, pct_start=0.1)
 
-    for epoch in range(args.stage1_epochs):
-        train_loss = train_epoch(model, train_loader, criterion, optimizer, scaler,
-                                 args.accumulation_steps, ema, epoch, args.stage1_epochs, args.deep_supervision)
+        for epoch in range(start_epoch, args.stage1_epochs):
+            train_loss = train_epoch(model, train_loader, criterion, optimizer, scaler,
+                                     args.accumulation_steps, ema, epoch, args.stage1_epochs, args.deep_supervision)
 
-        for _ in range(len(train_loader) // args.accumulation_steps):
-            scheduler.step()
+            for _ in range(len(train_loader) // args.accumulation_steps):
+                scheduler.step()
 
-        if ema:
-            ema.apply_shadow()
-        val_metrics = validate(model, val_loader, metrics)
-        if ema:
-            ema.restore()
+            if ema:
+                ema.apply_shadow()
+            val_metrics = validate(model, val_loader, metrics)
+            if ema:
+                ema.restore()
 
-        print(f"Loss: {train_loss:.4f} | IoU: {val_metrics['IoU']:.4f} | Dice: {val_metrics['Dice_Score']:.4f}")
+            print(f"Loss: {train_loss:.4f} | IoU: {val_metrics['IoU']:.4f} | Dice: {val_metrics['Dice_Score']:.4f}")
 
-        if val_metrics['IoU'] > best_iou:
-            best_iou = val_metrics['IoU']
-            torch.save({
-                'epoch': epoch,
-                'model_state_dict': model.state_dict(),
-                'ema_state_dict': ema.shadow if ema else None,
-                'best_iou': best_iou,
-                'args': vars(args)
-            }, f"{args.checkpoint_dir}/best_model.pth")
-            print(f"🏆 NEW BEST! IoU: {best_iou:.4f}")
+            if val_metrics['IoU'] > best_iou:
+                best_iou = val_metrics['IoU']
+                torch.save({
+                    'epoch': epoch,
+                    'model_state_dict': model.state_dict(),
+                    'ema_state_dict': ema.shadow if ema else None,
+                    'best_iou': best_iou,
+                    'args': vars(args)
+                }, f"{args.checkpoint_dir}/best_model.pth")
+                print(f"🏆 NEW BEST! IoU: {best_iou:.4f}")
 
-        history.append({'epoch': epoch, 'stage': 1, 'train_loss': train_loss, **val_metrics})
+            history.append({'epoch': epoch, 'stage': 1, 'train_loss': train_loss, **val_metrics})
 
-    print(f"\n✓ Stage 1 Complete. Best IoU: {best_iou:.4f}\n")
+        print(f"\n✓ Stage 1 Complete. Best IoU: {best_iou:.4f}\n")
+    else:
+        print(f"\n⏩ Skipping Stage 1 (resuming from epoch {start_epoch})\n")
 
     # ========================================
     # MEMORY CLEANUP BEFORE STAGE 2
     # ========================================
-    print("🧹 Cleaning up memory before Stage 2...")
-    del optimizer, scheduler
-    clear_gpu_memory()
-    print_gpu_memory()
+    if start_epoch < args.stage1_epochs:
+        # Only cleanup if we just finished Stage 1
+        print("🧹 Cleaning up memory before Stage 2...")
+        del optimizer, scheduler
+        clear_gpu_memory()
+        print_gpu_memory()
 
     # ========================================
     # Stage 2: Full Fine-tuning with reduced batch size
@@ -359,7 +398,11 @@ def train(args):
     total_steps = len(train_loader) * (args.epochs - args.stage1_epochs) // args.accumulation_steps
     scheduler = OneCycleLR(optimizer, max_lr=args.lr, total_steps=total_steps, pct_start=0.1)
 
-    for epoch in range(args.stage1_epochs, args.epochs):
+    stage2_start = max(start_epoch, args.stage1_epochs)
+    if stage2_start > args.stage1_epochs:
+        print(f"📍 Resuming Stage 2 from epoch {stage2_start}\n")
+
+    for epoch in range(stage2_start, args.epochs):
         # Progressive unfreezing: gradually unfreeze more layers
         if args.progressive_unfreeze:
             stage2_progress = epoch - args.stage1_epochs
