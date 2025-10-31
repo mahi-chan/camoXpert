@@ -285,7 +285,7 @@ def train(args):
             print(f"❌ ERROR: Checkpoint not found at {args.resume_from}")
             return
 
-        checkpoint = torch.load(args.resume_from, map_location='cuda')
+        checkpoint = torch.load(args.resume_from, map_location='cuda', weights_only=False)
         model.load_state_dict(checkpoint['model_state_dict'])
 
         if ema and checkpoint.get('ema_state_dict'):

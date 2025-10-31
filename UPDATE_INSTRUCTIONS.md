@@ -58,7 +58,7 @@ import torch
 model = CamoXpert(3, 1, pretrained=True, backbone='edgenext_base', num_experts=7).cuda()
 
 # Load checkpoint weights
-checkpoint = torch.load('checkpoints/best_model.pth')
+checkpoint = torch.load('checkpoints/best_model.pth', weights_only=False)
 model.load_state_dict(checkpoint['model_state_dict'])
 
 print(f"✓ Loaded checkpoint from epoch {checkpoint['epoch']}")
@@ -126,7 +126,7 @@ args.stage2_batch_size = 1
 args.gradient_checkpointing = True
 
 # Load checkpoint
-checkpoint = torch.load('checkpoints/best_model.pth')
+checkpoint = torch.load('checkpoints/best_model.pth', weights_only=False)
 
 # Create model and load weights
 model = CamoXpert(3, 1, pretrained=False, backbone=args.backbone,

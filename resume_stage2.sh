@@ -37,7 +37,7 @@ python3 -c "
 import torch
 import sys
 try:
-    ckpt = torch.load('$CHECKPOINT', map_location='cpu')
+    ckpt = torch.load('$CHECKPOINT', map_location='cpu', weights_only=False)
     print(f\"  Epoch: {ckpt['epoch']}\")
     print(f\"  Best IoU: {ckpt['best_iou']:.4f}\")
     if ckpt['epoch'] >= 30:

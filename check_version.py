@@ -72,7 +72,7 @@ def check_checkpoint():
 
             try:
                 import torch
-                ckpt = torch.load(path, map_location='cpu')
+                ckpt = torch.load(path, map_location='cpu', weights_only=False)
                 print(f"   Epoch: {ckpt.get('epoch', 'unknown')}")
                 print(f"   Best IoU: {ckpt.get('best_iou', 'unknown'):.4f}")
 

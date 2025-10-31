@@ -38,7 +38,7 @@ checkpoint_path = 'checkpoints/best_model.pth'
 if os.path.exists(checkpoint_path):
     print(f"✅ Checkpoint found: {checkpoint_path}")
     import torch
-    ckpt = torch.load(checkpoint_path, map_location='cpu')
+    ckpt = torch.load(checkpoint_path, map_location='cpu', weights_only=False)
     print(f"   Epoch: {ckpt['epoch']}")
     print(f"   Best IoU: {ckpt['best_iou']:.4f}")
 else:
@@ -254,7 +254,7 @@ FileLink('checkpoints/best_model.pth')
 
 # Cell 2: Verify Checkpoint
 import torch
-ckpt = torch.load('checkpoints/best_model.pth', map_location='cpu')
+ckpt = torch.load('checkpoints/best_model.pth', map_location='cpu', weights_only=False)
 print(f"Checkpoint Epoch: {ckpt['epoch']}, IoU: {ckpt['best_iou']:.4f}")
 
 # Cell 3: Resume Training
