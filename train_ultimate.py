@@ -78,19 +78,24 @@ class EMA:
 def enable_gradient_checkpointing(model):
     print("🔧 Enabling gradient checkpointing...")
     checkpointed = 0
+
+    def make_checkpointed_forward(original_forward):
+        """Factory function to create checkpointed forward with proper closure"""
+        def checkpointed_forward(self, *args, **kwargs):
+            def custom_forward(*inputs):
+                return original_forward(*inputs, **kwargs)
+
+            return gradient_checkpoint(custom_forward, *args, use_reentrant=False)
+
+        return checkpointed_forward
+
     for name, module in model.named_modules():
         if 'moe' in name.lower() or 'sdta' in name.lower():
             if hasattr(module, 'forward'):
                 original_forward = module.forward
-
-                def checkpointed_forward(self, *args, **kwargs):
-                    def custom_forward(*inputs):
-                        return original_forward(*inputs, **kwargs)
-
-                    return gradient_checkpoint(custom_forward, *args, use_reentrant=False)
-
-                module.forward = checkpointed_forward.__get__(module, type(module))
+                module.forward = make_checkpointed_forward(original_forward).__get__(module, type(module))
                 checkpointed += 1
+
     print(f"✓ Checkpointed {checkpointed} modules")
     return model
 
