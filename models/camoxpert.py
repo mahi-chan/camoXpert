@@ -53,16 +53,19 @@ class CamoXpert(nn.Module):
         # ========================================
         self.backbone = self._create_backbone(backbone, pretrained)
 
-        # Get feature dimensions from backbone
-        # EdgeNeXt outputs 4 stages with different channel dimensions
-        if 'small' in backbone:
-            self.feature_dims = [80, 192, 384, 768]
-        elif 'base' in backbone:
-            self.feature_dims = [128, 256, 512, 1024]
-        else:
-            self.feature_dims = [128, 256, 512, 1024]
+        # Get ACTUAL feature dimensions from backbone by running a test forward pass
+        # This ensures we have the correct dimensions regardless of backbone variant
+        print("\nDetecting backbone feature dimensions...")
+        with torch.no_grad():
+            dummy_input = torch.randn(1, 3, 224, 224)
+            if torch.cuda.is_available():
+                dummy_input = dummy_input.cuda()
+                self.backbone = self.backbone.cuda()
+            test_features = self.backbone(dummy_input)
+            self.feature_dims = [f.shape[1] for f in test_features]
+            self.backbone = self.backbone.cpu()  # Move back to CPU for now
 
-        print(f"Feature dimensions: {self.feature_dims}")
+        print(f"Detected feature dimensions: {self.feature_dims}")
 
         # ========================================
         # 2. SDTA Enhancement Blocks
@@ -136,21 +139,37 @@ class CamoXpert(nn.Module):
 
     def _create_backbone(self, backbone: str, pretrained: bool):
         """Create EdgeNeXt backbone"""
+        import timm
+
+        print(f"\nLoading backbone: {backbone}")
+        print(f"Pretrained: {pretrained}")
+
         try:
-            import timm
             model = timm.create_model(backbone, pretrained=pretrained, features_only=True)
+            print(f"✓ Successfully loaded: {backbone}")
             return model
         except Exception as e:
-            print(f"⚠️  Error loading backbone: {e}")
-            print("Attempting alternative backbone loading...")
+            print(f"⚠️  Error loading '{backbone}': {e}")
+            print("Attempting fallback backbone loading...")
 
-            # Fallback
-            import timm
-            if 'small' in backbone:
-                model = timm.create_model('edgenext_small', pretrained=pretrained, features_only=True)
-            else:
-                model = timm.create_model('edgenext_base', pretrained=pretrained, features_only=True)
-            return model
+            # Fallback mapping for common names
+            fallback_map = {
+                'edgenext_small': 'edgenext_small',
+                'edgenext_base': 'edgenext_base',
+                'edgenext_base_usi': 'edgenext_base',
+            }
+
+            fallback_name = fallback_map.get(backbone, 'edgenext_small')
+            print(f"Trying fallback: {fallback_name}")
+
+            try:
+                model = timm.create_model(fallback_name, pretrained=pretrained, features_only=True)
+                print(f"✓ Fallback successful: {fallback_name}")
+                print(f"⚠️  Note: Using '{fallback_name}' instead of '{backbone}'")
+                return model
+            except Exception as e2:
+                print(f"❌ Fallback failed: {e2}")
+                raise RuntimeError(f"Could not load backbone '{backbone}' or fallback '{fallback_name}'")
 
     def forward(self, x, return_deep_supervision=False):
         """
