@@ -44,6 +44,10 @@ def parse_args():
     parser.add_argument('--device', type=str, default='cuda')
     parser.add_argument('--num-workers', type=int, default=4)
     parser.add_argument('--seed', type=int, default=42)
+    parser.add_argument('--stage2-batch-size', type=int, default=None,
+                        help='Batch size for stage 2 (default: same as --batch-size)')
+    parser.add_argument('--progressive-unfreeze', action='store_true', default=False,
+                        help='Gradually unfreeze backbone layers in stage 2')
 
     return parser.parse_args()
 
@@ -75,6 +79,22 @@ class EMA:
                 param.data = self.backup[name]
 
 
+def clear_gpu_memory():
+    """Clear GPU memory cache and collect garbage"""
+    import gc
+    gc.collect()
+    torch.cuda.empty_cache()
+    torch.cuda.synchronize()
+
+
+def print_gpu_memory():
+    """Print current GPU memory usage"""
+    if torch.cuda.is_available():
+        allocated = torch.cuda.memory_allocated() / 1024**3
+        reserved = torch.cuda.memory_reserved() / 1024**3
+        print(f"GPU Memory: {allocated:.2f}GB allocated | {reserved:.2f}GB reserved")
+
+
 def enable_gradient_checkpointing(model):
     print("🔧 Enabling gradient checkpointing...")
     checkpointed = 0
@@ -100,6 +120,42 @@ def enable_gradient_checkpointing(model):
     return model
 
 
+def progressive_unfreeze_backbone(model, stage):
+    """
+    Progressively unfreeze backbone layers
+    stage 0: freeze all
+    stage 1: unfreeze last layer
+    stage 2: unfreeze last 2 layers
+    stage 3: unfreeze all
+    """
+    # First freeze everything
+    for param in model.backbone.parameters():
+        param.requires_grad = False
+
+    if stage == 0:
+        return
+
+    # Get backbone layers
+    backbone_children = list(model.backbone.children())
+    num_layers = len(backbone_children)
+
+    if stage >= 3:
+        # Unfreeze all
+        for param in model.backbone.parameters():
+            param.requires_grad = True
+        print("✓ Backbone: All layers unfrozen")
+    else:
+        # Unfreeze last 'stage' layers
+        layers_to_unfreeze = backbone_children[-stage:]
+        for layer in layers_to_unfreeze:
+            for param in layer.parameters():
+                param.requires_grad = True
+        print(f"✓ Backbone: Last {stage}/{num_layers} layers unfrozen")
+
+    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"   Trainable parameters: {trainable/1e6:.1f}M")
+
+
 def train_epoch(model, loader, criterion, optimizer, scaler, accumulation_steps, ema, epoch, total_epochs,
                 use_deep_sup):
     model.train()
@@ -112,7 +168,7 @@ def train_epoch(model, loader, criterion, optimizer, scaler, accumulation_steps,
         images = images.cuda(non_blocking=True)
         masks = masks.cuda(non_blocking=True)
 
-        with torch.cuda.amp.autocast():
+        with torch.amp.autocast('cuda'):
             pred, aux_loss, deep = model(images, return_deep_supervision=use_deep_sup)
             loss, _ = criterion(pred, masks, aux_loss, deep)
             loss = loss / accumulation_steps
@@ -154,10 +210,18 @@ def validate(model, loader, metrics):
 
 
 def train(args):
+    # Enable PyTorch memory optimizations
+    os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
+
     set_seed(args.seed)
     device = torch.device(args.device)
 
-    effective_batch = args.batch_size * args.accumulation_steps
+    # Set stage 2 batch size (default to half of stage 1 for memory efficiency)
+    if args.stage2_batch_size is None:
+        args.stage2_batch_size = max(1, args.batch_size // 2)
+
+    effective_batch_s1 = args.batch_size * args.accumulation_steps
+    effective_batch_s2 = args.stage2_batch_size * args.accumulation_steps
 
     print("\n" + "=" * 70)
     print("CAMOXPERT ULTIMATE TRAINING")
@@ -165,13 +229,17 @@ def train(args):
     print(f"Backbone:         {args.backbone}")
     print(f"Experts:          {args.num_experts}")
     print(f"Resolution:       {args.img_size}px")
-    print(f"Batch Size:       {args.batch_size} × {args.accumulation_steps} = {effective_batch} effective")
+    print(f"Stage 1 Batch:    {args.batch_size} × {args.accumulation_steps} = {effective_batch_s1} effective")
+    print(f"Stage 2 Batch:    {args.stage2_batch_size} × {args.accumulation_steps} = {effective_batch_s2} effective")
     print(f"Epochs:           {args.epochs}")
     print(f"Deep Supervision: {args.deep_supervision}")
     print(f"Grad Checkpoint:  {args.gradient_checkpointing}")
+    print(f"Progressive:      {args.progressive_unfreeze}")
     print(f"EMA:              {args.use_ema}")
     print(f"\n🎯 Target: IoU ≥ 0.72")
     print("=" * 70 + "\n")
+
+    print_gpu_memory()
 
     os.makedirs(args.checkpoint_dir, exist_ok=True)
 
@@ -247,13 +315,41 @@ def train(args):
 
     print(f"\n✓ Stage 1 Complete. Best IoU: {best_iou:.4f}\n")
 
-    # Stage 2
-    print("=" * 70)
+    # ========================================
+    # MEMORY CLEANUP BEFORE STAGE 2
+    # ========================================
+    print("🧹 Cleaning up memory before Stage 2...")
+    del optimizer, scheduler
+    clear_gpu_memory()
+    print_gpu_memory()
+
+    # ========================================
+    # Stage 2: Full Fine-tuning with reduced batch size
+    # ========================================
+    print("\n" + "=" * 70)
     print("STAGE 2: FULL FINE-TUNING")
     print("=" * 70)
 
-    for param in model.parameters():
-        param.requires_grad = True
+    # Create new dataloader with reduced batch size for Stage 2
+    if args.stage2_batch_size != args.batch_size:
+        print(f"🔧 Reducing batch size: {args.batch_size} → {args.stage2_batch_size}")
+        train_loader = DataLoader(train_data, args.stage2_batch_size, shuffle=True,
+                                  num_workers=args.num_workers, pin_memory=True, drop_last=True)
+        val_loader = DataLoader(val_data, args.stage2_batch_size, shuffle=False,
+                                num_workers=args.num_workers, pin_memory=True)
+
+    if args.progressive_unfreeze:
+        print("📈 Using progressive unfreezing strategy")
+        progressive_unfreeze_backbone(model, stage=1)
+    else:
+        print("🔓 Unfreezing all parameters")
+        for param in model.parameters():
+            param.requires_grad = True
+        trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        print(f"   Trainable parameters: {trainable/1e6:.1f}M")
+
+    print()
+    print_gpu_memory()
 
     optimizer = AdamW([
         {'params': model.backbone.parameters(), 'lr': args.lr * 0.1},
@@ -264,6 +360,33 @@ def train(args):
     scheduler = OneCycleLR(optimizer, max_lr=args.lr, total_steps=total_steps, pct_start=0.1)
 
     for epoch in range(args.stage1_epochs, args.epochs):
+        # Progressive unfreezing: gradually unfreeze more layers
+        if args.progressive_unfreeze:
+            stage2_progress = epoch - args.stage1_epochs
+            total_stage2 = args.epochs - args.stage1_epochs
+            if stage2_progress == total_stage2 // 3:
+                print("\n📈 Progressive unfreeze: Stage 2/3")
+                progressive_unfreeze_backbone(model, stage=2)
+                # Recreate optimizer with new parameters
+                optimizer = AdamW([
+                    {'params': model.backbone.parameters(), 'lr': args.lr * 0.1},
+                    {'params': [p for n, p in model.named_parameters() if 'backbone' not in n], 'lr': args.lr}
+                ], weight_decay=args.weight_decay)
+                clear_gpu_memory()
+                print_gpu_memory()
+                print()
+            elif stage2_progress == 2 * total_stage2 // 3:
+                print("\n📈 Progressive unfreeze: Stage 3/3 (Full)")
+                progressive_unfreeze_backbone(model, stage=3)
+                # Recreate optimizer with new parameters
+                optimizer = AdamW([
+                    {'params': model.backbone.parameters(), 'lr': args.lr * 0.1},
+                    {'params': [p for n, p in model.named_parameters() if 'backbone' not in n], 'lr': args.lr}
+                ], weight_decay=args.weight_decay)
+                clear_gpu_memory()
+                print_gpu_memory()
+                print()
+
         train_loss = train_epoch(model, train_loader, criterion, optimizer, scaler,
                                  args.accumulation_steps, ema, epoch, args.epochs, args.deep_supervision)
 
