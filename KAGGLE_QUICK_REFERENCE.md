@@ -12,7 +12,8 @@
 %cd /kaggle/working/camoXpert
 !git checkout claude/investigate-gpu-bottleneck-011CUdzKFPf87kvDNa4Za2Y2
 
-# 2. Install dependencies
+# 2. Install dependencies (numpy<2 for OpenCV compatibility)
+!pip install -q "numpy>=1.24.0,<2.0.0"
 !pip install -q torch>=2.0.0 torchvision>=0.15.0 timm==0.9.12 albumentations==1.3.1 einops==0.7.0
 !pip install -q opencv-python Pillow tqdm matplotlib pyyaml scipy tensorboard scikit-learn
 

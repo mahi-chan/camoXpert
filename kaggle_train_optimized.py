@@ -33,9 +33,10 @@ print("\n✓ Repository cloned and checked out to optimized branch")
 
 # Install dependencies
 print("\n[2/5] Installing dependencies...")
+!pip install -q "numpy>=1.24.0,<2.0.0"
 !pip install -q torch>=2.0.0 torchvision>=0.15.0
 !pip install -q timm==0.9.12 albumentations==1.3.1 einops==0.7.0
-!pip install -q opencv-python==4.8.1.78 Pillow>=9.5.0 tqdm>=4.65.0
+!pip install -q opencv-python>=4.8.0 Pillow>=9.5.0 tqdm>=4.65.0
 !pip install -q matplotlib>=3.7.0 pyyaml>=6.0 scipy>=1.10.0
 !pip install -q tensorboard>=2.7.0 scikit-learn>=0.24.2
 
