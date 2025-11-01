@@ -8,7 +8,7 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 from torch.optim import AdamW
-from torch.optim.lr_scheduler import OneCycleLR
+from torch.optim.lr_scheduler import OneCycleLR, CosineAnnealingLR, CosineAnnealingWarmRestarts
 import json
 from tqdm import tqdm
 import numpy as np
@@ -52,6 +52,16 @@ def parse_args():
                         help='Path to checkpoint to resume from')
     parser.add_argument('--skip-stage1', action='store_true', default=False,
                         help='Skip stage 1 and go directly to stage 2 (use with --resume-from)')
+    parser.add_argument('--stage2-lr', type=float, default=None,
+                        help='Learning rate for Stage 2 (default: same as --lr)')
+    parser.add_argument('--scheduler', type=str, choices=['onecycle', 'cosine', 'cosine_restart', 'none'],
+                        default='onecycle', help='Learning rate scheduler')
+    parser.add_argument('--min-lr', type=float, default=1e-6,
+                        help='Minimum learning rate for cosine schedulers')
+    parser.add_argument('--warmup-epochs', type=int, default=0,
+                        help='Number of warmup epochs for Stage 2')
+    parser.add_argument('--t-mult', type=int, default=2,
+                        help='T_mult for cosine_restart scheduler')
 
     return parser.parse_args()
 
@@ -158,6 +168,39 @@ def progressive_unfreeze_backbone(model, stage):
 
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"   Trainable parameters: {trainable/1e6:.1f}M")
+
+
+def create_scheduler(optimizer, scheduler_type, total_steps=None, total_epochs=None,
+                    max_lr=None, min_lr=1e-6, warmup_epochs=0, t_mult=2):
+    """Create learning rate scheduler"""
+
+    if scheduler_type == 'onecycle':
+        if total_steps is None:
+            raise ValueError("total_steps required for onecycle scheduler")
+        return OneCycleLR(optimizer, max_lr=max_lr, total_steps=total_steps, pct_start=0.1)
+
+    elif scheduler_type == 'cosine':
+        if total_epochs is None:
+            raise ValueError("total_epochs required for cosine scheduler")
+        return CosineAnnealingLR(optimizer, T_max=total_epochs, eta_min=min_lr)
+
+    elif scheduler_type == 'cosine_restart':
+        if total_epochs is None:
+            raise ValueError("total_epochs required for cosine_restart scheduler")
+        return CosineAnnealingWarmRestarts(optimizer, T_0=total_epochs//4, T_mult=t_mult, eta_min=min_lr)
+
+    else:  # 'none'
+        return None
+
+
+def warmup_lr(optimizer, epoch, warmup_epochs, base_lr):
+    """Apply learning rate warmup"""
+    if epoch < warmup_epochs:
+        warmup_factor = (epoch + 1) / warmup_epochs
+        for param_group in optimizer.param_groups:
+            param_group['lr'] = base_lr * warmup_factor
+        return True
+    return False
 
 
 def train_epoch(model, loader, criterion, optimizer, scaler, accumulation_steps, ema, epoch, total_epochs,
@@ -317,15 +360,27 @@ def train(args):
         optimizer = AdamW(filter(lambda p: p.requires_grad, model.parameters()),
                           lr=args.lr, weight_decay=args.weight_decay)
 
+        # Create scheduler for Stage 1
         total_steps = len(train_loader) * args.stage1_epochs // args.accumulation_steps
-        scheduler = OneCycleLR(optimizer, max_lr=args.lr, total_steps=total_steps, pct_start=0.1)
+        total_epochs = args.stage1_epochs
+        scheduler = create_scheduler(optimizer, args.scheduler,
+                                     total_steps=total_steps,
+                                     total_epochs=total_epochs,
+                                     max_lr=args.lr,
+                                     min_lr=args.min_lr,
+                                     t_mult=args.t_mult)
 
         for epoch in range(start_epoch, args.stage1_epochs):
             train_loss = train_epoch(model, train_loader, criterion, optimizer, scaler,
                                      args.accumulation_steps, ema, epoch, args.stage1_epochs, args.deep_supervision)
 
-            for _ in range(len(train_loader) // args.accumulation_steps):
-                scheduler.step()
+            # Step scheduler if it exists
+            if scheduler is not None:
+                if args.scheduler == 'onecycle':
+                    for _ in range(len(train_loader) // args.accumulation_steps):
+                        scheduler.step()
+                else:
+                    scheduler.step()
 
             if ema:
                 ema.apply_shadow()
@@ -390,13 +445,31 @@ def train(args):
     print()
     print_gpu_memory()
 
+    # Use stage2-specific LR if provided, otherwise use default
+    stage2_lr = args.stage2_lr if args.stage2_lr is not None else args.lr
+
+    print(f"Stage 2 Learning Rate: {stage2_lr}")
+    if args.warmup_epochs > 0:
+        print(f"Warmup epochs: {args.warmup_epochs}")
+    if args.scheduler != 'none':
+        print(f"Scheduler: {args.scheduler}")
+        if args.scheduler in ['cosine', 'cosine_restart']:
+            print(f"  Min LR: {args.min_lr}")
+
     optimizer = AdamW([
-        {'params': model.backbone.parameters(), 'lr': args.lr * 0.1},
-        {'params': [p for n, p in model.named_parameters() if 'backbone' not in n], 'lr': args.lr}
+        {'params': model.backbone.parameters(), 'lr': stage2_lr * 0.1},
+        {'params': [p for n, p in model.named_parameters() if 'backbone' not in n], 'lr': stage2_lr}
     ], weight_decay=args.weight_decay)
 
+    # Create scheduler for Stage 2
     total_steps = len(train_loader) * (args.epochs - args.stage1_epochs) // args.accumulation_steps
-    scheduler = OneCycleLR(optimizer, max_lr=args.lr, total_steps=total_steps, pct_start=0.1)
+    total_epochs = args.epochs - args.stage1_epochs
+    scheduler = create_scheduler(optimizer, args.scheduler,
+                                 total_steps=total_steps,
+                                 total_epochs=total_epochs,
+                                 max_lr=stage2_lr,
+                                 min_lr=args.min_lr,
+                                 t_mult=args.t_mult)
 
     stage2_start = max(start_epoch, args.stage1_epochs)
     if stage2_start > args.stage1_epochs:
@@ -412,8 +485,8 @@ def train(args):
                 progressive_unfreeze_backbone(model, stage=2)
                 # Recreate optimizer with new parameters
                 optimizer = AdamW([
-                    {'params': model.backbone.parameters(), 'lr': args.lr * 0.1},
-                    {'params': [p for n, p in model.named_parameters() if 'backbone' not in n], 'lr': args.lr}
+                    {'params': model.backbone.parameters(), 'lr': stage2_lr * 0.1},
+                    {'params': [p for n, p in model.named_parameters() if 'backbone' not in n], 'lr': stage2_lr}
                 ], weight_decay=args.weight_decay)
                 clear_gpu_memory()
                 print_gpu_memory()
@@ -423,18 +496,27 @@ def train(args):
                 progressive_unfreeze_backbone(model, stage=3)
                 # Recreate optimizer with new parameters
                 optimizer = AdamW([
-                    {'params': model.backbone.parameters(), 'lr': args.lr * 0.1},
-                    {'params': [p for n, p in model.named_parameters() if 'backbone' not in n], 'lr': args.lr}
+                    {'params': model.backbone.parameters(), 'lr': stage2_lr * 0.1},
+                    {'params': [p for n, p in model.named_parameters() if 'backbone' not in n], 'lr': stage2_lr}
                 ], weight_decay=args.weight_decay)
                 clear_gpu_memory()
                 print_gpu_memory()
                 print()
 
+        # Apply warmup if in warmup period
+        stage2_epoch = epoch - args.stage1_epochs
+        in_warmup = warmup_lr(optimizer, stage2_epoch, args.warmup_epochs, stage2_lr)
+
         train_loss = train_epoch(model, train_loader, criterion, optimizer, scaler,
                                  args.accumulation_steps, ema, epoch, args.epochs, args.deep_supervision)
 
-        for _ in range(len(train_loader) // args.accumulation_steps):
-            scheduler.step()
+        # Step scheduler if not in warmup and scheduler exists
+        if not in_warmup and scheduler is not None:
+            if args.scheduler == 'onecycle':
+                for _ in range(len(train_loader) // args.accumulation_steps):
+                    scheduler.step()
+            else:
+                scheduler.step()
 
         if ema:
             ema.apply_shadow()
@@ -442,7 +524,10 @@ def train(args):
         if ema:
             ema.restore()
 
-        print(f"Loss: {train_loss:.4f} | IoU: {val_metrics['IoU']:.4f} | Dice: {val_metrics['Dice_Score']:.4f}")
+        # Print training metrics with LR
+        current_lr = optimizer.param_groups[0]['lr']
+        lr_info = f" | LR: {current_lr:.6f}" if args.scheduler != 'none' or in_warmup else ""
+        print(f"Loss: {train_loss:.4f} | IoU: {val_metrics['IoU']:.4f} | Dice: {val_metrics['Dice_Score']:.4f}{lr_info}")
 
         if val_metrics['IoU'] > best_iou:
             best_iou = val_metrics['IoU']
