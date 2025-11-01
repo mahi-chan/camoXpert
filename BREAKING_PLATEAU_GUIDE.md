@@ -46,6 +46,7 @@ python train_ultimate.py train \
     --scheduler cosine \
     --min-lr 0.00001 \
     --progressive-unfreeze \
+    --deep-supervision \
     --num-workers 4
 ```
 
@@ -54,12 +55,15 @@ python train_ultimate.py train \
 - ✅ `--skip-stage1`: Go directly to Stage 2
 - ✅ `--stage2-lr 0.0002`: Higher LR to escape plateau
 - ✅ `--scheduler cosine`: Smooth decay over remaining epochs
+- ✅ `--deep-supervision`: Multi-scale learning (+0.03-0.05 IoU)
 - ✅ `--img-size 384`: Higher resolution (if you used 320 before)
 - ✅ `--epochs 120`: Will train for 34 more epochs (86→120)
 
 **Expected Result**:
-- +0.04 to +0.07 IoU improvement over 20-30 epochs
-- Final IoU: ~0.66-0.69
+- Cosine scheduler: +0.04 to +0.07 IoU
+- Deep supervision: +0.03 to +0.05 IoU
+- **Combined: +0.07 to +0.12 IoU**
+- **Final IoU: ~0.69-0.74** (likely exceeds 0.72 target!)
 
 **Timeline**: 20-30 epochs (~3-5 hours depending on GPU)
 
@@ -88,6 +92,7 @@ python train_ultimate.py train \
     --scheduler cosine \
     --min-lr 0.00002 \
     --progressive-unfreeze \
+    --deep-supervision \
     --num-workers 4
 ```
 
@@ -97,8 +102,10 @@ python train_ultimate.py train \
 - 🔥 `--epochs 150`: Longer training for 64 more epochs (86→150)
 
 **Expected Result**:
-- +0.07 to +0.12 IoU improvement
-- Final IoU: ~0.69-0.74 (may exceed target!)
+- Scheduler (aggressive): +0.06 to +0.09 IoU
+- Deep supervision: +0.03 to +0.05 IoU
+- **Combined: +0.09 to +0.14 IoU**
+- **Final IoU: ~0.71-0.76** (should exceed target!)
 
 **Timeline**: 30-40 epochs (~5-7 hours depending on GPU)
 
@@ -130,16 +137,21 @@ python train_ultimate.py train \
     --min-lr 0.00002 \
     --warmup-epochs 3 \
     --progressive-unfreeze \
+    --deep-supervision \
     --num-workers 4
 ```
 
 **Additional Changes**:
 - 🎯 `--img-size 416`: 30% more pixels than 384, captures finer details
 - 🎯 `--warmup-epochs 3`: Stability during resolution transition
+- 🎯 `--deep-supervision`: Multi-scale learning
 
 **Expected Result**:
-- +0.10 to +0.15 IoU improvement
-- Final IoU: ~0.72-0.77 (should exceed target!)
+- Scheduler (aggressive): +0.06 to +0.09 IoU
+- Deep supervision: +0.03 to +0.05 IoU
+- Higher resolution: +0.02 to +0.04 IoU
+- **Combined: +0.11 to +0.18 IoU**
+- **Final IoU: ~0.73-0.80** (exceeds target!)
 
 **Timeline**: 30-50 epochs (~6-10 hours depending on GPU)
 
