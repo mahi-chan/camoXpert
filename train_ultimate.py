@@ -41,6 +41,8 @@ def parse_args():
     parser.add_argument('--deep-supervision', action='store_true', default=False)
     parser.add_argument('--gradient-checkpointing', action='store_true', default=False)
     parser.add_argument('--use-ema', action='store_true', default=False)
+    parser.add_argument('--ema-decay', type=float, default=0.999,
+                        help='EMA decay rate (default: 0.999, use 0.9999 for very stable training)')
     parser.add_argument('--device', type=str, default='cuda')
     parser.add_argument('--num-workers', type=int, default=4)
     parser.add_argument('--seed', type=int, default=42)
@@ -313,7 +315,9 @@ def train(args):
     criterion = AdvancedCODLoss(bce_weight=5.0, iou_weight=3.0, edge_weight=2.0, aux_weight=0.1)
     metrics = CODMetrics()
     scaler = torch.cuda.amp.GradScaler()
-    ema = EMA(model) if args.use_ema else None
+    ema = EMA(model, decay=args.ema_decay) if args.use_ema else None
+    if args.use_ema:
+        print(f"✨ EMA enabled with decay: {args.ema_decay}")
 
     best_iou = 0.0
     history = []
