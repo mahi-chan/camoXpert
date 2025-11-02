@@ -29,6 +29,8 @@ class AdvancedCODLoss(nn.Module):
 
     def iou_loss(self, pred, target):
         """IoU loss"""
+        # Clamp logits to prevent NaN in mixed precision
+        pred = torch.clamp(pred, min=-15, max=15)
         pred = torch.sigmoid(pred)  # Apply sigmoid here
 
         smooth = 1e-5
@@ -40,6 +42,8 @@ class AdvancedCODLoss(nn.Module):
 
     def edge_loss(self, pred, target):
         """Edge-aware loss"""
+        # Clamp logits to prevent NaN in mixed precision
+        pred = torch.clamp(pred, min=-15, max=15)
         pred = torch.sigmoid(pred)  # Apply sigmoid here
 
         # Sobel filters for edge detection
@@ -51,7 +55,8 @@ class AdvancedCODLoss(nn.Module):
         # Compute edges
         pred_edge_x = F.conv2d(pred, sobel_x, padding=1)
         pred_edge_y = F.conv2d(pred, sobel_y, padding=1)
-        pred_edge = torch.sqrt(pred_edge_x ** 2 + pred_edge_y ** 2 + 1e-5)
+        # Ensure non-negative before sqrt
+        pred_edge = torch.sqrt(torch.clamp(pred_edge_x ** 2 + pred_edge_y ** 2, min=0) + 1e-5)
 
         target_edge_x = F.conv2d(target, sobel_x, padding=1)
         target_edge_y = F.conv2d(target, sobel_y, padding=1)
@@ -67,6 +72,9 @@ class AdvancedCODLoss(nn.Module):
             aux_loss: Auxiliary MoE loss
             deep_outputs: Deep supervision outputs (list of logits)
         """
+
+        # Clamp main prediction logits to prevent NaN in mixed precision
+        pred = torch.clamp(pred, min=-15, max=15)
 
         # Main losses (pred is logits)
         bce = self.bce(pred, target)
@@ -94,6 +102,9 @@ class AdvancedCODLoss(nn.Module):
         if deep_outputs is not None:
             deep_loss = 0
             for i, deep_pred in enumerate(deep_outputs):
+                # Clamp deep supervision logits to prevent NaN
+                deep_pred = torch.clamp(deep_pred, min=-15, max=15)
+
                 # Resize target to match deep_pred size
                 if deep_pred.shape[2:] != target.shape[2:]:
                     target_resized = F.interpolate(target, size=deep_pred.shape[2:],
