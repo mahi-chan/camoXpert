@@ -222,11 +222,28 @@ def train_epoch(model, loader, criterion, optimizer, scaler, accumulation_steps,
             loss, _ = criterion(pred, masks, aux_loss, deep)
             loss = loss / accumulation_steps
 
+        # Check for NaN/Inf in loss
+        if not torch.isfinite(loss):
+            print(f"\n❌ NaN/Inf detected in loss at batch {batch_idx}!")
+            print(f"   Loss value: {loss.item()}")
+            print(f"   Skipping this batch and stopping training for safety.")
+            print(f"   Please reduce learning rate and restart from last good checkpoint.")
+            raise ValueError("Training stopped due to NaN/Inf loss. See error message above.")
+
         scaler.scale(loss).backward()
 
         if (batch_idx + 1) % accumulation_steps == 0:
             scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+
+            # Check for NaN/Inf in gradients
+            if not torch.isfinite(grad_norm):
+                print(f"\n❌ NaN/Inf detected in gradients at batch {batch_idx}!")
+                print(f"   Gradient norm: {grad_norm.item()}")
+                print(f"   This indicates gradient explosion.")
+                print(f"   Please reduce learning rate and restart from last good checkpoint.")
+                raise ValueError("Training stopped due to NaN/Inf gradients. See error message above.")
+
             scaler.step(optimizer)
             scaler.update()
             optimizer.zero_grad(set_to_none=True)
@@ -238,7 +255,14 @@ def train_epoch(model, loader, criterion, optimizer, scaler, accumulation_steps,
 
     if len(loader) % accumulation_steps != 0:
         scaler.unscale_(optimizer)
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+
+        # Check for NaN/Inf in final gradients
+        if not torch.isfinite(grad_norm):
+            print(f"\n❌ NaN/Inf detected in final gradients!")
+            print(f"   Gradient norm: {grad_norm.item()}")
+            raise ValueError("Training stopped due to NaN/Inf gradients in final step.")
+
         scaler.step(optimizer)
         scaler.update()
         optimizer.zero_grad(set_to_none=True)
