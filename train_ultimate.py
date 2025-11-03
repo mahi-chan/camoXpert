@@ -227,6 +227,18 @@ def train_epoch(model, loader, criterion, optimizer, scaler, accumulation_steps,
 
         with torch.amp.autocast('cuda'):
             pred, aux_loss, deep = model(images, return_deep_supervision=use_deep_sup)
+
+            # Debug: Check for NaN/Inf in model outputs BEFORE loss
+            if not torch.isfinite(pred).all():
+                print(f"\n❌ NaN/Inf in model prediction output at batch {batch_idx}!")
+                print(f"   Pred min: {pred.min().item()}, max: {pred.max().item()}")
+                raise ValueError("Model produced NaN/Inf outputs")
+
+            if aux_loss is not None and not torch.isfinite(aux_loss).all():
+                print(f"\n❌ NaN/Inf in aux_loss at batch {batch_idx}!")
+                print(f"   Aux loss: {aux_loss}")
+                raise ValueError("Aux loss is NaN/Inf")
+
             loss, _ = criterion(pred, masks, aux_loss, deep)
             loss = loss / accumulation_steps
 
@@ -374,7 +386,8 @@ def train(args):
 
     criterion = AdvancedCODLoss(bce_weight=5.0, iou_weight=3.0, edge_weight=2.0, aux_weight=0.1)
     metrics = CODMetrics()
-    scaler = torch.cuda.amp.GradScaler()
+    # More conservative GradScaler to prevent FP16 overflow
+    scaler = torch.cuda.amp.GradScaler(init_scale=2048, growth_interval=1000)
     ema = EMA(model, decay=args.ema_decay) if args.use_ema else None
     if args.use_ema:
         print(f"✨ EMA enabled with decay: {args.ema_decay}")
