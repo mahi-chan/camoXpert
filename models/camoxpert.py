@@ -265,6 +265,9 @@ class CamoXpert(nn.Module):
         # ========================================
         pred = self.final_conv(x0_up)  # [B, 1, H, W] - LOGITS
 
+        # Clamp logits to prevent NaN in mixed precision training
+        pred = torch.clamp(pred, min=-15, max=15)
+
         # DO NOT APPLY SIGMOID HERE
         # The loss function (BCEWithLogitsLoss) will handle it
 
@@ -272,6 +275,8 @@ class CamoXpert(nn.Module):
         # 5. Return outputs
         # ========================================
         if return_deep_supervision:
+            # Clamp deep supervision outputs as well
+            deep_outputs = [torch.clamp(d, min=-15, max=15) for d in deep_outputs]
             return pred, total_aux_loss, deep_outputs
         else:
             return pred, total_aux_loss, None
