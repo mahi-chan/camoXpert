@@ -289,12 +289,36 @@ def train(args):
     set_seed(args.seed)
     device = torch.device(args.device)
 
+    # ========================================
+    # Multi-GPU Detection and Setup
+    # ========================================
+    num_gpus = torch.cuda.device_count() if torch.cuda.is_available() else 0
+    use_multi_gpu = num_gpus > 1
+
+    if use_multi_gpu:
+        print("\n" + "=" * 70)
+        print(f"🚀 MULTI-GPU DETECTED: {num_gpus} GPUs Available")
+        print("=" * 70)
+        for i in range(num_gpus):
+            gpu_name = torch.cuda.get_device_name(i)
+            gpu_memory = torch.cuda.get_device_properties(i).total_memory / 1e9
+            print(f"  GPU {i}: {gpu_name} ({gpu_memory:.1f} GB)")
+        print(f"\n✓ DataParallel will be enabled automatically")
+        print(f"✓ Effective batch size will be {num_gpus}x larger")
+        print("=" * 70 + "\n")
+    elif num_gpus == 1:
+        print(f"\n✓ Using single GPU: {torch.cuda.get_device_name(0)}")
+    else:
+        print("\n⚠️  WARNING: No GPU detected, training will be very slow")
+
     # Set stage 2 batch size (default to half of stage 1 for memory efficiency)
     if args.stage2_batch_size is None:
         args.stage2_batch_size = max(1, args.batch_size // 2)
 
-    effective_batch_s1 = args.batch_size * args.accumulation_steps
-    effective_batch_s2 = args.stage2_batch_size * args.accumulation_steps
+    # Adjust batch sizes for multi-GPU
+    # Each GPU will process batch_size samples, so effective batch = batch_size * num_gpus
+    effective_batch_s1 = args.batch_size * args.accumulation_steps * max(1, num_gpus)
+    effective_batch_s2 = args.stage2_batch_size * args.accumulation_steps * max(1, num_gpus)
 
     print("\n" + "=" * 70)
     print("CAMOXPERT ULTIMATE TRAINING")
@@ -302,8 +326,13 @@ def train(args):
     print(f"Backbone:         {args.backbone}")
     print(f"Experts:          {args.num_experts}")
     print(f"Resolution:       {args.img_size}px")
-    print(f"Stage 1 Batch:    {args.batch_size} × {args.accumulation_steps} = {effective_batch_s1} effective")
-    print(f"Stage 2 Batch:    {args.stage2_batch_size} × {args.accumulation_steps} = {effective_batch_s2} effective")
+    if use_multi_gpu:
+        print(f"GPUs:             {num_gpus} (DataParallel)")
+        print(f"Stage 1 Batch:    {args.batch_size} × {num_gpus} GPUs × {args.accumulation_steps} = {effective_batch_s1} effective")
+        print(f"Stage 2 Batch:    {args.stage2_batch_size} × {num_gpus} GPUs × {args.accumulation_steps} = {effective_batch_s2} effective")
+    else:
+        print(f"Stage 1 Batch:    {args.batch_size} × {args.accumulation_steps} = {effective_batch_s1} effective")
+        print(f"Stage 2 Batch:    {args.stage2_batch_size} × {args.accumulation_steps} = {effective_batch_s2} effective")
     print(f"Epochs:           {args.epochs}")
     print(f"Deep Supervision: {args.deep_supervision}")
     print(f"Grad Checkpoint:  {args.gradient_checkpointing}")
@@ -333,13 +362,21 @@ def train(args):
     if args.gradient_checkpointing:
         model = enable_gradient_checkpointing(model)
 
+    # Wrap model with DataParallel if multiple GPUs are available
+    if use_multi_gpu:
+        print(f"\n🔧 Wrapping model with DataParallel across {num_gpus} GPUs...")
+        model = nn.DataParallel(model)
+        print(f"✓ Model replicated across GPUs: {list(range(num_gpus))}\n")
+
     total, trainable = count_parameters(model)
     print(f"Model: {total / 1e6:.1f}M params\n")
 
     criterion = AdvancedCODLoss(bce_weight=5.0, iou_weight=3.0, edge_weight=2.0, aux_weight=0.1)
     metrics = CODMetrics()
     scaler = torch.cuda.amp.GradScaler()
-    ema = EMA(model, decay=args.ema_decay) if args.use_ema else None
+    # EMA should track the underlying model (unwrap DataParallel if needed)
+    model_for_ema = model.module if use_multi_gpu else model
+    ema = EMA(model_for_ema, decay=args.ema_decay) if args.use_ema else None
     if args.use_ema:
         print(f"✨ EMA enabled with decay: {args.ema_decay}")
 
@@ -357,7 +394,21 @@ def train(args):
             return
 
         checkpoint = torch.load(args.resume_from, map_location='cuda', weights_only=False)
-        model.load_state_dict(checkpoint['model_state_dict'])
+
+        # Handle DataParallel: load into the underlying model if wrapped
+        model_to_load = model.module if use_multi_gpu else model
+        try:
+            model_to_load.load_state_dict(checkpoint['model_state_dict'])
+        except RuntimeError:
+            # Try loading with different key structure (handle saved with/without DataParallel)
+            state_dict = checkpoint['model_state_dict']
+            # Remove 'module.' prefix if present in checkpoint but not in model
+            if list(state_dict.keys())[0].startswith('module.') and not use_multi_gpu:
+                state_dict = {k.replace('module.', ''): v for k, v in state_dict.items()}
+            # Add 'module.' prefix if present in model but not in checkpoint
+            elif not list(state_dict.keys())[0].startswith('module.') and use_multi_gpu:
+                state_dict = {f'module.{k}': v for k, v in state_dict.items()}
+            model_to_load.load_state_dict(state_dict)
 
         if ema and checkpoint.get('ema_state_dict'):
             ema.shadow = checkpoint['ema_state_dict']
@@ -382,10 +433,13 @@ def train(args):
         print("STAGE 1: DECODER TRAINING")
         print("=" * 70)
 
-        for param in model.backbone.parameters():
+        # Get underlying model for parameter manipulation
+        model_for_params = model.module if use_multi_gpu else model
+
+        for param in model_for_params.backbone.parameters():
             param.requires_grad = False
 
-        optimizer = AdamW(filter(lambda p: p.requires_grad, model.parameters()),
+        optimizer = AdamW(filter(lambda p: p.requires_grad, model_for_params.parameters()),
                           lr=args.lr, weight_decay=args.weight_decay)
 
         # Create scheduler for Stage 1
@@ -420,9 +474,11 @@ def train(args):
 
             if val_metrics['IoU'] > best_iou:
                 best_iou = val_metrics['IoU']
+                # Save underlying model (unwrap DataParallel if needed)
+                model_to_save = model.module if use_multi_gpu else model
                 torch.save({
                     'epoch': epoch,
-                    'model_state_dict': model.state_dict(),
+                    'model_state_dict': model_to_save.state_dict(),
                     'ema_state_dict': ema.shadow if ema else None,
                     'best_iou': best_iou,
                     'args': vars(args)
@@ -460,14 +516,17 @@ def train(args):
         val_loader = DataLoader(val_data, args.stage2_batch_size, shuffle=False,
                                 num_workers=args.num_workers, pin_memory=True)
 
+    # Get underlying model for parameter manipulation
+    model_for_params = model.module if use_multi_gpu else model
+
     if args.progressive_unfreeze:
         print("📈 Using progressive unfreezing strategy")
-        progressive_unfreeze_backbone(model, stage=1)
+        progressive_unfreeze_backbone(model_for_params, stage=1)
     else:
         print("🔓 Unfreezing all parameters")
-        for param in model.parameters():
+        for param in model_for_params.parameters():
             param.requires_grad = True
-        trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+        trainable = sum(p.numel() for p in model_for_params.parameters() if p.requires_grad)
         print(f"   Trainable parameters: {trainable/1e6:.1f}M")
 
     print()
@@ -485,8 +544,8 @@ def train(args):
             print(f"  Min LR: {args.min_lr}")
 
     optimizer = AdamW([
-        {'params': model.backbone.parameters(), 'lr': stage2_lr * 0.1},
-        {'params': [p for n, p in model.named_parameters() if 'backbone' not in n], 'lr': stage2_lr}
+        {'params': model_for_params.backbone.parameters(), 'lr': stage2_lr * 0.1},
+        {'params': [p for n, p in model_for_params.named_parameters() if 'backbone' not in n], 'lr': stage2_lr}
     ], weight_decay=args.weight_decay)
 
     # Create scheduler for Stage 2
@@ -510,22 +569,22 @@ def train(args):
             total_stage2 = args.epochs - args.stage1_epochs
             if stage2_progress == total_stage2 // 3:
                 print("\n📈 Progressive unfreeze: Stage 2/3")
-                progressive_unfreeze_backbone(model, stage=2)
+                progressive_unfreeze_backbone(model_for_params, stage=2)
                 # Recreate optimizer with new parameters
                 optimizer = AdamW([
-                    {'params': model.backbone.parameters(), 'lr': stage2_lr * 0.1},
-                    {'params': [p for n, p in model.named_parameters() if 'backbone' not in n], 'lr': stage2_lr}
+                    {'params': model_for_params.backbone.parameters(), 'lr': stage2_lr * 0.1},
+                    {'params': [p for n, p in model_for_params.named_parameters() if 'backbone' not in n], 'lr': stage2_lr}
                 ], weight_decay=args.weight_decay)
                 clear_gpu_memory()
                 print_gpu_memory()
                 print()
             elif stage2_progress == 2 * total_stage2 // 3:
                 print("\n📈 Progressive unfreeze: Stage 3/3 (Full)")
-                progressive_unfreeze_backbone(model, stage=3)
+                progressive_unfreeze_backbone(model_for_params, stage=3)
                 # Recreate optimizer with new parameters
                 optimizer = AdamW([
-                    {'params': model.backbone.parameters(), 'lr': stage2_lr * 0.1},
-                    {'params': [p for n, p in model.named_parameters() if 'backbone' not in n], 'lr': stage2_lr}
+                    {'params': model_for_params.backbone.parameters(), 'lr': stage2_lr * 0.1},
+                    {'params': [p for n, p in model_for_params.named_parameters() if 'backbone' not in n], 'lr': stage2_lr}
                 ], weight_decay=args.weight_decay)
                 clear_gpu_memory()
                 print_gpu_memory()
@@ -559,9 +618,11 @@ def train(args):
 
         if val_metrics['IoU'] > best_iou:
             best_iou = val_metrics['IoU']
+            # Save underlying model (unwrap DataParallel if needed)
+            model_to_save = model.module if use_multi_gpu else model
             torch.save({
                 'epoch': epoch,
-                'model_state_dict': model.state_dict(),
+                'model_state_dict': model_to_save.state_dict(),
                 'ema_state_dict': ema.shadow if ema else None,
                 'best_iou': best_iou,
                 'args': vars(args)
