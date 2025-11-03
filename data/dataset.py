@@ -91,12 +91,15 @@ class COD10KDataset(Dataset):
         print(f"  Mask dir:  {self.mask_dir}")
 
         if self.augment:
+            # Lightweight augmentation pipeline for faster data loading
+            # ColorJitter is expensive - reduced to p=0.2 and lighter params
             self.transform = A.Compose([
                 A.Resize(img_size, img_size),
                 A.HorizontalFlip(p=0.5),
                 A.VerticalFlip(p=0.2),
                 A.RandomRotate90(p=0.2),
-                A.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1, p=0.5),
+                # Reduced ColorJitter intensity and probability (was p=0.5, very CPU-heavy)
+                A.ColorJitter(brightness=0.1, contrast=0.1, saturation=0.1, p=0.2),
                 A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
                 ToTensorV2()
             ])

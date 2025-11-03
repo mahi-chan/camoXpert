@@ -340,11 +340,13 @@ def train(args):
     train_loader = DataLoader(train_data, args.batch_size, shuffle=True,
                               num_workers=args.num_workers, pin_memory=True, drop_last=True,
                               persistent_workers=True if args.num_workers > 0 else False,
-                              prefetch_factor=3)
+                              prefetch_factor=3,
+                              multiprocessing_context='fork' if args.num_workers > 0 else None)
     val_loader = DataLoader(val_data, args.batch_size, shuffle=False,
                             num_workers=args.num_workers, pin_memory=True,
                             persistent_workers=True if args.num_workers > 0 else False,
-                            prefetch_factor=2)
+                            prefetch_factor=2,
+                            multiprocessing_context='fork' if args.num_workers > 0 else None)
 
     print(f"Train: {len(train_data)} | Val: {len(val_data)}\n")
 
@@ -505,11 +507,13 @@ def train(args):
         train_loader = DataLoader(train_data, args.stage2_batch_size, shuffle=True,
                                   num_workers=args.num_workers, pin_memory=True, drop_last=True,
                                   persistent_workers=True if args.num_workers > 0 else False,
-                                  prefetch_factor=3)
+                                  prefetch_factor=3,
+                                  multiprocessing_context='fork' if args.num_workers > 0 else None)
         val_loader = DataLoader(val_data, args.stage2_batch_size, shuffle=False,
                                 num_workers=args.num_workers, pin_memory=True,
                                 persistent_workers=True if args.num_workers > 0 else False,
-                                prefetch_factor=2)
+                                prefetch_factor=2,
+                                multiprocessing_context='fork' if args.num_workers > 0 else None)
 
     if args.progressive_unfreeze:
         print("📈 Using progressive unfreezing strategy")
