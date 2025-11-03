@@ -242,7 +242,8 @@ def train_epoch(model, loader, criterion, optimizer, scaler, accumulation_steps,
 
         if (batch_idx + 1) % accumulation_steps == 0:
             scaler.unscale_(optimizer)
-            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            # Clip gradients MORE aggressively (0.5 instead of 1.0) to prevent explosions
+            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
 
             # Check for NaN/Inf in gradients
             if not torch.isfinite(grad_norm):
@@ -263,7 +264,8 @@ def train_epoch(model, loader, criterion, optimizer, scaler, accumulation_steps,
 
     if len(loader) % accumulation_steps != 0:
         scaler.unscale_(optimizer)
-        grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        # Clip gradients MORE aggressively (0.5 instead of 1.0) to prevent explosions
+        grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
 
         # Check for NaN/Inf in final gradients
         if not torch.isfinite(grad_norm):
