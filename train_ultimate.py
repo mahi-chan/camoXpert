@@ -338,9 +338,13 @@ def train(args):
     val_data = COD10KDataset(args.dataset_path, 'val', args.img_size, augment=False)
 
     train_loader = DataLoader(train_data, args.batch_size, shuffle=True,
-                              num_workers=args.num_workers, pin_memory=True, drop_last=True)
+                              num_workers=args.num_workers, pin_memory=True, drop_last=True,
+                              persistent_workers=True if args.num_workers > 0 else False,
+                              prefetch_factor=3)
     val_loader = DataLoader(val_data, args.batch_size, shuffle=False,
-                            num_workers=args.num_workers, pin_memory=True)
+                            num_workers=args.num_workers, pin_memory=True,
+                            persistent_workers=True if args.num_workers > 0 else False,
+                            prefetch_factor=2)
 
     print(f"Train: {len(train_data)} | Val: {len(val_data)}\n")
 
@@ -499,9 +503,13 @@ def train(args):
     if args.stage2_batch_size != args.batch_size:
         print(f"🔧 Reducing batch size: {args.batch_size} → {args.stage2_batch_size}")
         train_loader = DataLoader(train_data, args.stage2_batch_size, shuffle=True,
-                                  num_workers=args.num_workers, pin_memory=True, drop_last=True)
+                                  num_workers=args.num_workers, pin_memory=True, drop_last=True,
+                                  persistent_workers=True if args.num_workers > 0 else False,
+                                  prefetch_factor=3)
         val_loader = DataLoader(val_data, args.stage2_batch_size, shuffle=False,
-                                num_workers=args.num_workers, pin_memory=True)
+                                num_workers=args.num_workers, pin_memory=True,
+                                persistent_workers=True if args.num_workers > 0 else False,
+                                prefetch_factor=2)
 
     if args.progressive_unfreeze:
         print("📈 Using progressive unfreezing strategy")
