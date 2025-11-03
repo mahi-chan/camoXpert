@@ -91,12 +91,13 @@ class COD10KDataset(Dataset):
         print(f"  Image dir: {self.image_dir}")
         print(f"  Mask dir:  {self.mask_dir}")
 
-        # Cache images and masks in memory to eliminate disk I/O bottleneck
+        # Cache RESIZED images and masks in memory (much smaller!)
+        # Caching full-size images uses too much RAM
         self.image_cache = {}
         self.mask_cache = {}
 
         if self.cache_in_memory:
-            print(f"  Caching {len(self.image_list)} images in RAM...")
+            print(f"  Caching {len(self.image_list)} RESIZED images ({img_size}px) in RAM...")
             from tqdm import tqdm
             for img_name in tqdm(self.image_list, desc=f"Loading {split}"):
                 # Load image
@@ -104,7 +105,10 @@ class COD10KDataset(Dataset):
                 image = cv2.imread(img_path)
                 if image is None:
                     raise ValueError(f"Failed to load image: {img_path}")
-                self.image_cache[img_name] = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+                image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+                # RESIZE NOW to save RAM (320x320 vs 400x600 = 60% smaller!)
+                image = cv2.resize(image, (img_size, img_size), interpolation=cv2.INTER_LINEAR)
+                self.image_cache[img_name] = image  # Keep as uint8 (4x smaller than float32)
 
                 # Load mask
                 mask_extensions = ['.png', '.jpg', '.jpeg', '.PNG', '.JPG']
@@ -117,26 +121,26 @@ class COD10KDataset(Dataset):
                         break
                 if mask is None:
                     raise ValueError(f"Failed to load mask for: {img_name}")
+                # RESIZE mask too
+                mask = cv2.resize(mask, (img_size, img_size), interpolation=cv2.INTER_NEAREST)
                 self.mask_cache[img_name] = (mask > 128).astype(np.float32)
 
-            print(f"  ✓ Cached {len(self.image_cache)} images in RAM")
+            mem_mb = len(self.image_cache) * img_size * img_size * 3 / (1024**2)
+            print(f"  ✓ Cached {len(self.image_cache)} images in RAM (~{mem_mb:.0f}MB)")
 
         if self.augment:
-            # Lightweight augmentation pipeline for faster data loading
-            # ColorJitter is expensive - reduced to p=0.2 and lighter params
+            # NO RESIZE in transform - already done in cache!
             self.transform = A.Compose([
-                A.Resize(img_size, img_size),
                 A.HorizontalFlip(p=0.5),
                 A.VerticalFlip(p=0.2),
                 A.RandomRotate90(p=0.2),
-                # Reduced ColorJitter intensity and probability (was p=0.5, very CPU-heavy)
                 A.ColorJitter(brightness=0.1, contrast=0.1, saturation=0.1, p=0.2),
                 A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
                 ToTensorV2()
             ])
         else:
+            # NO RESIZE in transform - already done in cache!
             self.transform = A.Compose([
-                A.Resize(img_size, img_size),
                 A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
                 ToTensorV2()
             ])
