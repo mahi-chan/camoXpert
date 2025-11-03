@@ -280,11 +280,20 @@ def train_epoch(model, loader, criterion, optimizer, scaler, accumulation_steps,
 
 @torch.no_grad()
 def validate(model, loader, metrics):
-    model.eval()
+    """
+    Validation function
+
+    Note: Uses unwrapped model (single GPU) to avoid DataParallel edge cases
+    with odd batch sizes that don't divide evenly across GPUs.
+    """
+    # Unwrap DataParallel for validation (avoids misalignment errors)
+    actual_model = model.module if isinstance(model, nn.DataParallel) else model
+    actual_model.eval()
+
     all_metrics = []
     for images, masks in tqdm(loader, desc="Validating", leave=False):
         images, masks = images.cuda(), masks.cuda()
-        pred, _, _ = model(images)
+        pred, _, _ = actual_model(images)
         pred = torch.sigmoid(pred)
         all_metrics.append(metrics.compute_all(pred, masks))
     return {k: np.mean([m[k] for m in all_metrics]) for k in all_metrics[0]}
