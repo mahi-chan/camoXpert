@@ -95,6 +95,10 @@ class AdvancedCODLoss(nn.Module):
 
         # Add auxiliary MoE loss
         if aux_loss is not None:
+            # Handle DataParallel case where aux_loss might be a vector [num_gpus]
+            # DataParallel gathers scalar losses from each GPU into a tensor
+            if aux_loss.dim() > 0:
+                aux_loss = aux_loss.mean()
             total_loss += self.aux_weight * aux_loss
             loss_dict['aux'] = aux_loss.item()
 
