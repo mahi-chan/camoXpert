@@ -1,5 +1,6 @@
 """
 Command-line training script with gradient accumulation & checkpointing
+Includes gradient explosion protection with automatic detection and recovery.
 """
 import argparse
 import os
@@ -10,6 +11,7 @@ from torch.utils.data import DataLoader
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import OneCycleLR
 import json
+import glob
 from tqdm import tqdm
 import numpy as np
 from torch.utils.checkpoint import checkpoint as gradient_checkpoint
@@ -24,11 +26,27 @@ from models.utils import set_seed
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description='CamoXpert SOTA Training with Memory Optimization')
+    parser = argparse.ArgumentParser(
+        description='CamoXpert SOTA Training with Gradient Explosion Protection',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Gradient Explosion Protection:
+  - Gradient clipping: 0.5 (conservative)
+  - Stage 2 LR: 50% of Stage 1 for stability
+  - Conservative gradient scaler with slower growth
+  - Automatic NaN/Inf detection with checkpoint recovery
+
+Recovery from Gradient Explosion:
+  If training crashes with gradient explosion, resume with:
+    --resume ./checkpoints/best_model.pth --lr 0.000125
+        """
+    )
 
     parser.add_argument('command', type=str, choices=['train'])
     parser.add_argument('--dataset-path', type=str, required=True)
     parser.add_argument('--checkpoint-dir', type=str, default='./checkpoints')
+    parser.add_argument('--resume', type=str, default=None,
+                        help='Path to checkpoint to resume from')
     parser.add_argument('--backbone', type=str, default='edgenext_base')
     parser.add_argument('--num-experts', type=int, default=7)
     parser.add_argument('--batch-size', type=int, default=2)
@@ -38,6 +56,8 @@ def parse_args():
     parser.add_argument('--stage1-epochs', type=int, default=30)
     parser.add_argument('--lr', type=float, default=0.00025)
     parser.add_argument('--weight-decay', type=float, default=0.0001)
+    parser.add_argument('--grad-clip', type=float, default=0.5,
+                        help='Gradient clipping norm (default: 0.5, lower = more stable)')
     parser.add_argument('--deep-supervision', action='store_true', default=False)
     parser.add_argument('--gradient-checkpointing', action='store_true', default=False)
     parser.add_argument('--use-ema', action='store_true', default=False)
@@ -96,10 +116,19 @@ def enable_gradient_checkpointing(model):
 
 
 def train_epoch(model, loader, criterion, optimizer, scaler, accumulation_steps, ema, epoch, total_epochs,
-                use_deep_sup):
+                use_deep_sup, max_grad_norm=0.5):
+    """
+    Training epoch with gradient explosion protection.
+
+    Args:
+        max_grad_norm: Maximum gradient norm for clipping (default: 0.5 for stability)
+    """
     model.train()
     epoch_loss = 0
     optimizer.zero_grad(set_to_none=True)
+
+    # Gradient norm tracking
+    grad_norms = []
 
     pbar = tqdm(enumerate(loader), total=len(loader), desc=f"Epoch {epoch + 1}/{total_epochs}")
 
@@ -110,13 +139,37 @@ def train_epoch(model, loader, criterion, optimizer, scaler, accumulation_steps,
         with torch.cuda.amp.autocast('cuda'):
             pred, aux_loss, deep = model(images, return_deep_supervision=use_deep_sup)
             loss, _ = criterion(pred, masks, aux_loss, deep)
+
+            # Check for NaN/Inf in loss
+            if not torch.isfinite(loss):
+                print(f"\n❌ NaN/Inf detected in loss at batch {batch_idx}!")
+                print(f"   Loss value: {loss.item()}")
+                raise ValueError("Training stopped due to NaN/Inf loss.")
+
             loss = loss / accumulation_steps
 
         scaler.scale(loss).backward()
 
         if (batch_idx + 1) % accumulation_steps == 0:
+            # Unscale gradients for clipping
             scaler.unscale_(optimizer)
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+
+            # Compute gradient norm and check for NaN/Inf
+            grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+            grad_norms.append(grad_norm.item())
+
+            # Check for gradient explosion
+            if not torch.isfinite(grad_norm):
+                print(f"\n❌ NaN/Inf detected in gradients at batch {batch_idx}!")
+                print(f"   Gradient norm: {grad_norm.item()}")
+                print(f"   This indicates gradient explosion.")
+                print(f"   Please reduce learning rate and restart from last good checkpoint.")
+                raise ValueError("Training stopped due to NaN/Inf gradients. See error message above.")
+
+            # Warn on high gradient norms
+            if grad_norm > max_grad_norm * 5:
+                print(f"\n⚠️  High gradient norm detected: {grad_norm:.2f} (clipped to {max_grad_norm})")
+
             scaler.step(optimizer)
             scaler.update()
             optimizer.zero_grad(set_to_none=True)
@@ -124,14 +177,34 @@ def train_epoch(model, loader, criterion, optimizer, scaler, accumulation_steps,
                 ema.update()
 
         epoch_loss += loss.item() * accumulation_steps
-        pbar.set_postfix({'loss': f'{loss.item() * accumulation_steps:.4f}'})
 
+        # Show gradient norm in progress bar
+        if grad_norms:
+            pbar.set_postfix({
+                'loss': f'{loss.item() * accumulation_steps:.4f}',
+                'grad': f'{grad_norms[-1]:.3f}'
+            })
+        else:
+            pbar.set_postfix({'loss': f'{loss.item() * accumulation_steps:.4f}'})
+
+    # Handle remaining batches
     if len(loader) % accumulation_steps != 0:
         scaler.unscale_(optimizer)
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+        grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), max_grad_norm)
+
+        if not torch.isfinite(grad_norm):
+            print(f"\n❌ NaN/Inf detected in final gradient update!")
+            raise ValueError("Training stopped due to NaN/Inf gradients.")
+
         scaler.step(optimizer)
         scaler.update()
         optimizer.zero_grad(set_to_none=True)
+
+    # Report gradient statistics
+    if grad_norms:
+        avg_grad = np.mean(grad_norms)
+        max_grad = np.max(grad_norms)
+        print(f"   Gradient norm - Avg: {avg_grad:.3f}, Max: {max_grad:.3f}")
 
     return epoch_loss / len(loader)
 
@@ -197,24 +270,51 @@ def train(args):
 
     best_iou = 0.0
     history = []
+    start_epoch = 0
+
+    # Resume from checkpoint if specified
+    if args.resume:
+        print(f"\n📂 Resuming from checkpoint: {args.resume}")
+        checkpoint = torch.load(args.resume, map_location=device)
+        model.load_state_dict(checkpoint['model_state_dict'])
+
+        if 'best_iou' in checkpoint:
+            best_iou = checkpoint['best_iou']
+            print(f"   Resumed best IoU: {best_iou:.4f}")
+
+        if 'epoch' in checkpoint:
+            start_epoch = checkpoint['epoch'] + 1
+            print(f"   Resuming from epoch: {start_epoch}")
+
+        if ema and 'ema_state_dict' in checkpoint and checkpoint['ema_state_dict'] is not None:
+            ema.shadow = checkpoint['ema_state_dict']
+            print(f"   Restored EMA weights")
+
+        print(f"✓ Checkpoint loaded successfully\n")
 
     # Stage 1
-    print("=" * 70)
-    print("STAGE 1: DECODER TRAINING")
-    print("=" * 70)
+    if start_epoch < args.stage1_epochs:
+        print("=" * 70)
+        print("STAGE 1: DECODER TRAINING")
+        print("=" * 70)
 
-    for param in model.backbone.parameters():
-        param.requires_grad = False
+        for param in model.backbone.parameters():
+            param.requires_grad = False
 
-    optimizer = AdamW(filter(lambda p: p.requires_grad, model.parameters()),
-                      lr=args.lr, weight_decay=args.weight_decay)
+        optimizer = AdamW(filter(lambda p: p.requires_grad, model.parameters()),
+                          lr=args.lr, weight_decay=args.weight_decay)
 
-    total_steps = len(train_loader) * args.stage1_epochs // args.accumulation_steps
-    scheduler = OneCycleLR(optimizer, max_lr=args.lr, total_steps=total_steps, pct_start=0.1)
+        total_steps = len(train_loader) * args.stage1_epochs // args.accumulation_steps
+        scheduler = OneCycleLR(optimizer, max_lr=args.lr, total_steps=total_steps, pct_start=0.1)
 
-    for epoch in range(args.stage1_epochs):
+        # Skip already completed epochs if resuming
+        for _ in range(start_epoch * len(train_loader) // args.accumulation_steps):
+            scheduler.step()
+
+    for epoch in range(max(start_epoch, 0), args.stage1_epochs):
         train_loss = train_epoch(model, train_loader, criterion, optimizer, scaler,
-                                 args.accumulation_steps, ema, epoch, args.stage1_epochs, args.deep_supervision)
+                                 args.accumulation_steps, ema, epoch, args.stage1_epochs,
+                                 args.deep_supervision, max_grad_norm=args.grad_clip)
 
         for _ in range(len(train_loader) // args.accumulation_steps):
             scheduler.step()
@@ -243,48 +343,124 @@ def train(args):
     print(f"\n✓ Stage 1 Complete. Best IoU: {best_iou:.4f}\n")
 
     # Stage 2
-    print("=" * 70)
-    print("STAGE 2: FULL FINE-TUNING")
-    print("=" * 70)
+    if start_epoch >= args.stage1_epochs or args.resume:
+        print("\n🧹 Cleaning up memory before Stage 2...")
+        torch.cuda.empty_cache()
+        allocated = torch.cuda.memory_allocated() / 1024**3
+        reserved = torch.cuda.memory_reserved() / 1024**3
+        print(f"GPU Memory: {allocated:.2f}GB allocated | {reserved:.2f}GB reserved\n")
 
-    for param in model.parameters():
-        param.requires_grad = True
+        print("=" * 70)
+        print("STAGE 2: FULL FINE-TUNING")
+        print("=" * 70)
+        print("🔓 Unfreezing all parameters")
 
-    optimizer = AdamW([
-        {'params': model.backbone.parameters(), 'lr': args.lr * 0.1},
-        {'params': [p for n, p in model.named_parameters() if 'backbone' not in n], 'lr': args.lr}
-    ], weight_decay=args.weight_decay)
+        for param in model.parameters():
+            param.requires_grad = True
 
-    total_steps = len(train_loader) * (args.epochs - args.stage1_epochs) // args.accumulation_steps
-    scheduler = OneCycleLR(optimizer, max_lr=args.lr, total_steps=total_steps, pct_start=0.1)
+        total, trainable = count_parameters(model)
+        print(f"   Trainable parameters: {trainable / 1e6:.1f}M\n")
 
-    for epoch in range(args.stage1_epochs, args.epochs):
-        train_loss = train_epoch(model, train_loader, criterion, optimizer, scaler,
-                                 args.accumulation_steps, ema, epoch, args.epochs, args.deep_supervision)
+        # Use lower learning rate for Stage 2 to prevent gradient explosion
+        # Reduce max_lr by 50% for stability
+        stage2_lr = args.lr * 0.5
+        stage2_backbone_lr = stage2_lr * 0.1
 
-        for _ in range(len(train_loader) // args.accumulation_steps):
-            scheduler.step()
+        print(f"GPU Memory: {allocated:.2f}GB allocated | {reserved:.2f}GB reserved")
+        print(f"Stage 2 Learning Rate: {stage2_lr} (50% of Stage 1 for stability)")
+        print(f"Backbone Learning Rate: {stage2_backbone_lr}\n")
 
-        if ema:
-            ema.apply_shadow()
-        val_metrics = validate(model, val_loader, metrics)
-        if ema:
-            ema.restore()
+        optimizer = AdamW([
+            {'params': model.backbone.parameters(), 'lr': stage2_backbone_lr},
+            {'params': [p for n, p in model.named_parameters() if 'backbone' not in n], 'lr': stage2_lr}
+        ], weight_decay=args.weight_decay)
 
-        print(f"Loss: {train_loss:.4f} | IoU: {val_metrics['IoU']:.4f} | Dice: {val_metrics['Dice_Score']:.4f}")
+        total_steps = len(train_loader) * (args.epochs - args.stage1_epochs) // args.accumulation_steps
+        scheduler = OneCycleLR(optimizer, max_lr=stage2_lr, total_steps=total_steps, pct_start=0.1)
 
-        if val_metrics['IoU'] > best_iou:
-            best_iou = val_metrics['IoU']
+        # More conservative gradient scaler for Stage 2
+        scaler = torch.cuda.amp.GradScaler(
+            init_scale=2.**10,  # Lower initial scale
+            growth_factor=1.5,   # Slower growth
+            backoff_factor=0.5,  # Faster backoff on overflow
+            growth_interval=1000 # Less frequent scaling increases
+        )
+
+        # Skip already completed epochs if resuming
+        if start_epoch > args.stage1_epochs:
+            epochs_done = (start_epoch - args.stage1_epochs) * len(train_loader) // args.accumulation_steps
+            for _ in range(epochs_done):
+                scheduler.step()
+            print(f"   Skipped {start_epoch - args.stage1_epochs} completed epochs\n")
+
+    for epoch in range(max(start_epoch, args.stage1_epochs), args.epochs):
+        # Save checkpoint before each epoch for recovery
+        checkpoint_path = f"{args.checkpoint_dir}/epoch_{epoch}_checkpoint.pth"
+
+        try:
+            train_loss = train_epoch(model, train_loader, criterion, optimizer, scaler,
+                                     args.accumulation_steps, ema, epoch, args.epochs,
+                                     args.deep_supervision, max_grad_norm=args.grad_clip)
+
+            for _ in range(len(train_loader) // args.accumulation_steps):
+                scheduler.step()
+
+            if ema:
+                ema.apply_shadow()
+            val_metrics = validate(model, val_loader, metrics)
+            if ema:
+                ema.restore()
+
+            print(f"Loss: {train_loss:.4f} | IoU: {val_metrics['IoU']:.4f} | Dice: {val_metrics['Dice_Score']:.4f}")
+
+            if val_metrics['IoU'] > best_iou:
+                best_iou = val_metrics['IoU']
+                torch.save({
+                    'epoch': epoch,
+                    'model_state_dict': model.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'scheduler_state_dict': scheduler.state_dict(),
+                    'scaler_state_dict': scaler.state_dict(),
+                    'ema_state_dict': ema.shadow if ema else None,
+                    'best_iou': best_iou,
+                    'args': vars(args)
+                }, f"{args.checkpoint_dir}/best_model.pth")
+                print(f"🏆 NEW BEST! IoU: {best_iou:.4f}")
+
+            # Save latest checkpoint (for recovery)
             torch.save({
                 'epoch': epoch,
                 'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'scheduler_state_dict': scheduler.state_dict(),
+                'scaler_state_dict': scaler.state_dict(),
                 'ema_state_dict': ema.shadow if ema else None,
                 'best_iou': best_iou,
                 'args': vars(args)
-            }, f"{args.checkpoint_dir}/best_model.pth")
-            print(f"🏆 NEW BEST! IoU: {best_iou:.4f}")
+            }, checkpoint_path)
 
-        history.append({'epoch': epoch, 'stage': 2, 'train_loss': train_loss, **val_metrics})
+            history.append({'epoch': epoch, 'stage': 2, 'train_loss': train_loss, **val_metrics})
+
+            # Clean up old checkpoints (keep only last 3)
+            checkpoints = sorted(glob.glob(f"{args.checkpoint_dir}/epoch_*_checkpoint.pth"))
+            for old_ckpt in checkpoints[:-3]:
+                os.remove(old_ckpt)
+
+        except ValueError as e:
+            if "NaN/Inf" in str(e):
+                print(f"\n⚠️  Gradient explosion detected at epoch {epoch}!")
+                print(f"💡 Recovery suggestions:")
+                print(f"   1. Restart training from: {args.checkpoint_dir}/best_model.pth")
+                print(f"   2. Use lower learning rate: --lr {args.lr * 0.5}")
+                print(f"   3. Reduce batch size or use smaller model")
+                print(f"\n📊 Training history saved to: {args.checkpoint_dir}/history.json")
+
+                # Save what we have so far
+                with open(f"{args.checkpoint_dir}/history.json", 'w') as f:
+                    json.dump(history, f, indent=2)
+                raise
+            else:
+                raise
 
     with open(f"{args.checkpoint_dir}/history.json", 'w') as f:
         json.dump(history, f, indent=2)
