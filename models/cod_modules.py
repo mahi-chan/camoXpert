@@ -386,9 +386,12 @@ class CODEdgeExpert(nn.Module):
 
     def compute_edges(self, x):
         B, C, H, W = x.shape
-        sobel_x = self.sobel_x_base.repeat(C, 1, 1, 1)
-        sobel_y = self.sobel_y_base.repeat(C, 1, 1, 1)
-        laplacian = self.laplacian_base.repeat(C, 1, 1, 1)
+        device = x.device  # Get input device for DataParallel compatibility
+
+        # Move buffers to input device before repeat
+        sobel_x = self.sobel_x_base.to(device).repeat(C, 1, 1, 1)
+        sobel_y = self.sobel_y_base.to(device).repeat(C, 1, 1, 1)
+        laplacian = self.laplacian_base.to(device).repeat(C, 1, 1, 1)
 
         sx = F.conv2d(x, sobel_x, padding=1, groups=C)
         sy = F.conv2d(x, sobel_y, padding=1, groups=C)
