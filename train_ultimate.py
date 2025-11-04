@@ -64,6 +64,8 @@ def parse_args():
                         help='Number of warmup epochs for Stage 2')
     parser.add_argument('--t-mult', type=int, default=2,
                         help='T_mult for cosine_restart scheduler')
+    parser.add_argument('--no-amp', action='store_true', default=False,
+                        help='Disable mixed precision (use FP32 instead of FP16) - more stable but slower')
 
     return parser.parse_args()
 
@@ -214,7 +216,7 @@ def warmup_lr(optimizer, epoch, warmup_epochs, base_lr):
 
 
 def train_epoch(model, loader, criterion, optimizer, scaler, accumulation_steps, ema, epoch, total_epochs,
-                use_deep_sup):
+                use_deep_sup, use_amp=True):
     model.train()
     epoch_loss = 0
     optimizer.zero_grad(set_to_none=True)
@@ -225,7 +227,13 @@ def train_epoch(model, loader, criterion, optimizer, scaler, accumulation_steps,
         images = images.cuda(non_blocking=True)
         masks = masks.cuda(non_blocking=True)
 
-        with torch.amp.autocast('cuda'):
+        # Conditionally use mixed precision
+        if use_amp:
+            context = torch.amp.autocast('cuda')
+        else:
+            context = torch.cuda.amp.autocast(enabled=False)
+
+        with context:
             pred, aux_loss, deep = model(images, return_deep_supervision=use_deep_sup)
 
             # Debug: Check for NaN/Inf in model outputs BEFORE loss
@@ -250,10 +258,15 @@ def train_epoch(model, loader, criterion, optimizer, scaler, accumulation_steps,
             print(f"   Please reduce learning rate and restart from last good checkpoint.")
             raise ValueError("Training stopped due to NaN/Inf loss. See error message above.")
 
-        scaler.scale(loss).backward()
+        if use_amp:
+            scaler.scale(loss).backward()
+        else:
+            loss.backward()
 
         if (batch_idx + 1) % accumulation_steps == 0:
-            scaler.unscale_(optimizer)
+            if use_amp:
+                scaler.unscale_(optimizer)
+
             # Clip gradients MORE aggressively (0.5 instead of 1.0) to prevent explosions
             grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
 
@@ -265,8 +278,12 @@ def train_epoch(model, loader, criterion, optimizer, scaler, accumulation_steps,
                 print(f"   Please reduce learning rate and restart from last good checkpoint.")
                 raise ValueError("Training stopped due to NaN/Inf gradients. See error message above.")
 
-            scaler.step(optimizer)
-            scaler.update()
+            if use_amp:
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                optimizer.step()
+
             optimizer.zero_grad(set_to_none=True)
             if ema:
                 ema.update()
@@ -275,7 +292,8 @@ def train_epoch(model, loader, criterion, optimizer, scaler, accumulation_steps,
         pbar.set_postfix({'loss': f'{loss.item() * accumulation_steps:.4f}'})
 
     if len(loader) % accumulation_steps != 0:
-        scaler.unscale_(optimizer)
+        if use_amp:
+            scaler.unscale_(optimizer)
         # Clip gradients MORE aggressively (0.5 instead of 1.0) to prevent explosions
         grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
 
@@ -285,8 +303,11 @@ def train_epoch(model, loader, criterion, optimizer, scaler, accumulation_steps,
             print(f"   Gradient norm: {grad_norm.item()}")
             raise ValueError("Training stopped due to NaN/Inf gradients in final step.")
 
-        scaler.step(optimizer)
-        scaler.update()
+        if use_amp:
+            scaler.step(optimizer)
+            scaler.update()
+        else:
+            optimizer.step()
         optimizer.zero_grad(set_to_none=True)
 
     return epoch_loss / len(loader)
@@ -462,7 +483,8 @@ def train(args):
 
         for epoch in range(start_epoch, args.stage1_epochs):
             train_loss = train_epoch(model, train_loader, criterion, optimizer, scaler,
-                                     args.accumulation_steps, ema, epoch, args.stage1_epochs, args.deep_supervision)
+                                     args.accumulation_steps, ema, epoch, args.stage1_epochs, args.deep_supervision,
+                                     use_amp=not args.no_amp)
 
             # Step scheduler if it exists
             if scheduler is not None:
@@ -610,7 +632,8 @@ def train(args):
         in_warmup = warmup_lr(optimizer, stage2_epoch, args.warmup_epochs, stage2_lr)
 
         train_loss = train_epoch(model, train_loader, criterion, optimizer, scaler,
-                                 args.accumulation_steps, ema, epoch, args.epochs, args.deep_supervision)
+                                 args.accumulation_steps, ema, epoch, args.epochs, args.deep_supervision,
+                                 use_amp=not args.no_amp)
 
         # Step scheduler if not in warmup and scheduler exists
         if not in_warmup and scheduler is not None:
