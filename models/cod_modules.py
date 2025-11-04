@@ -393,9 +393,10 @@ class CODEdgeExpert(nn.Module):
         sobel_y = self.sobel_y_base.to(device).repeat(C, 1, 1, 1)
         laplacian = self.laplacian_base.to(device).repeat(C, 1, 1, 1)
 
-        sx = F.conv2d(x, sobel_x, padding=1, groups=C)
-        sy = F.conv2d(x, sobel_y, padding=1, groups=C)
-        lap = F.conv2d(x, laplacian, padding=1, groups=C)
+        # Make outputs contiguous to prevent misaligned address errors with DataParallel
+        sx = F.conv2d(x, sobel_x, padding=1, groups=C).contiguous()
+        sy = F.conv2d(x, sobel_y, padding=1, groups=C).contiguous()
+        lap = F.conv2d(x, laplacian, padding=1, groups=C).contiguous()
 
         sobel_feat = torch.sqrt(sx ** 2 + sy ** 2 + 1e-8)
         laplacian_feat = torch.abs(lap)
