@@ -398,9 +398,10 @@ class CODEdgeExpert(nn.Module):
         sy = F.conv2d(x, sobel_y, padding=1, groups=C).contiguous()
         lap = F.conv2d(x, laplacian, padding=1, groups=C).contiguous()
 
-        sobel_feat = torch.sqrt(sx ** 2 + sy ** 2 + 1e-8)
-        laplacian_feat = torch.abs(lap)
-        gradient_feat = torch.sqrt(sobel_feat ** 2 + laplacian_feat ** 2 + 1e-8)
+        # Ensure all intermediate tensors are contiguous for DataParallel
+        sobel_feat = torch.sqrt(sx ** 2 + sy ** 2 + 1e-8).contiguous()
+        laplacian_feat = torch.abs(lap).contiguous()
+        gradient_feat = torch.sqrt(sobel_feat ** 2 + laplacian_feat ** 2 + 1e-8).contiguous()
 
         return sobel_feat, laplacian_feat, gradient_feat
 
