@@ -17,8 +17,9 @@ from torch.utils.checkpoint import checkpoint as gradient_checkpoint
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from models.camoxpert import CamoXpert, count_parameters
+from models.camoxpert_cod import CamoXpertCOD
 from data.dataset import COD10KDataset
-from losses.advanced_loss import AdvancedCODLoss
+from losses.advanced_loss import AdvancedCODLoss, CODSpecializedLoss
 from metrics.cod_metrics import CODMetrics
 from models.utils import set_seed
 
@@ -66,6 +67,8 @@ def parse_args():
                         help='T_mult for cosine_restart scheduler')
     parser.add_argument('--no-amp', action='store_true', default=False,
                         help='Disable mixed precision (use FP32 instead of FP16) - more stable but slower')
+    parser.add_argument('--use-cod-specialized', action='store_true', default=False,
+                        help='Use 100%% COD-specialized architecture (recommended for best results)')
 
     return parser.parse_args()
 
@@ -234,7 +237,7 @@ def train_epoch(model, loader, criterion, optimizer, scaler, accumulation_steps,
             context = torch.cuda.amp.autocast(enabled=False)
 
         with context:
-            pred, aux_loss, deep = model(images, return_deep_supervision=use_deep_sup)
+            pred, aux_or_dict, deep = model(images, return_deep_supervision=use_deep_sup)
 
             # Debug: Check for NaN/Inf in model outputs BEFORE loss
             if not torch.isfinite(pred).all():
@@ -242,12 +245,26 @@ def train_epoch(model, loader, criterion, optimizer, scaler, accumulation_steps,
                 print(f"   Pred min: {pred.min().item()}, max: {pred.max().item()}")
                 raise ValueError("Model produced NaN/Inf outputs")
 
-            if aux_loss is not None and not torch.isfinite(aux_loss).all():
-                print(f"\n❌ NaN/Inf in aux_loss at batch {batch_idx}!")
-                print(f"   Aux loss: {aux_loss}")
-                raise ValueError("Aux loss is NaN/Inf")
+            # Handle different model outputs
+            if isinstance(aux_or_dict, dict):
+                # COD-specialized model returns dict with auxiliary outputs
+                uncertainty = aux_or_dict.get('uncertainty', None)
+                fg_map = aux_or_dict.get('fg_map', None)
+                search_map = aux_or_dict.get('search_map', None)
+                refinements = aux_or_dict.get('refinements', None)
+                aux_loss = None
+                loss, _ = criterion(pred, masks, aux_loss, deep,
+                                  uncertainty=uncertainty, fg_map=fg_map,
+                                  refinements=refinements, search_map=search_map)
+            else:
+                # Standard model returns aux_loss
+                aux_loss = aux_or_dict
+                if aux_loss is not None and not torch.isfinite(aux_loss).all():
+                    print(f"\n❌ NaN/Inf in aux_loss at batch {batch_idx}!")
+                    print(f"   Aux loss: {aux_loss}")
+                    raise ValueError("Aux loss is NaN/Inf")
+                loss, _ = criterion(pred, masks, aux_loss, deep)
 
-            loss, _ = criterion(pred, masks, aux_loss, deep)
             loss = loss / accumulation_steps
 
         # Check for NaN/Inf in loss
@@ -386,7 +403,12 @@ def train(args):
     print(f"Train: {len(train_data)} | Val: {len(val_data)}\n")
 
     # Model
-    model = CamoXpert(3, 1, pretrained=True, backbone=args.backbone, num_experts=args.num_experts).cuda()
+    if args.use_cod_specialized:
+        print("🎯 Using 100% COD-Specialized Architecture")
+        model = CamoXpertCOD(3, 1, pretrained=True, backbone=args.backbone).cuda()
+    else:
+        print("📦 Using Standard CamoXpert Architecture")
+        model = CamoXpert(3, 1, pretrained=True, backbone=args.backbone, num_experts=args.num_experts).cuda()
 
     # Multi-GPU support
     n_gpus = torch.cuda.device_count()
@@ -405,7 +427,13 @@ def train(args):
     total, trainable = count_parameters(model)
     print(f"Model: {total / 1e6:.1f}M params\n")
 
-    criterion = AdvancedCODLoss(bce_weight=5.0, iou_weight=3.0, edge_weight=2.0, aux_weight=0.1)
+    if args.use_cod_specialized:
+        print("Using COD-Specialized Loss Function")
+        criterion = CODSpecializedLoss(bce_weight=5.0, iou_weight=3.0, edge_weight=2.0,
+                                      boundary_weight=3.0, uncertainty_weight=0.5,
+                                      reverse_attention_weight=1.0, aux_weight=0.1)
+    else:
+        criterion = AdvancedCODLoss(bce_weight=5.0, iou_weight=3.0, edge_weight=2.0, aux_weight=0.1)
     metrics = CODMetrics()
     # More conservative GradScaler to prevent FP16 overflow
     scaler = torch.cuda.amp.GradScaler(init_scale=2048, growth_interval=1000)
