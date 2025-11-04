@@ -157,13 +157,13 @@ class EdgeExpert(nn.Module):
             x_c = x[:, c:c + 1, :, :]
             sx = F.conv2d(x_c, self.sobel_x, padding=1)
             sy = F.conv2d(x_c, self.sobel_y, padding=1)
-            sobel = torch.sqrt(sx ** 2 + sy ** 2 + 1e-8)
-            lap = torch.abs(F.conv2d(x_c, self.laplacian, padding=1))
+            sobel = torch.sqrt(sx ** 2 + sy ** 2 + 1e-8).contiguous()
+            lap = torch.abs(F.conv2d(x_c, self.laplacian, padding=1)).contiguous()
             sobel_edges.append(sobel)
             laplacian_edges.append(lap)
-        sobel_feat = torch.cat(sobel_edges, 1)
-        laplacian_feat = torch.cat(laplacian_edges, 1)
-        gradient_feat = torch.sqrt(sobel_feat ** 2 + laplacian_feat ** 2 + 1e-8)
+        sobel_feat = torch.cat(sobel_edges, 1).contiguous()
+        laplacian_feat = torch.cat(laplacian_edges, 1).contiguous()
+        gradient_feat = torch.sqrt(sobel_feat ** 2 + laplacian_feat ** 2 + 1e-8).contiguous()
         return sobel_feat, laplacian_feat, gradient_feat
 
     def forward(self, x):
