@@ -67,11 +67,12 @@ class SearchIdentificationModule(nn.Module):
         )
 
         # Identification branch: Enhanced features at search locations
+        # Using regular conv for DataParallel compatibility
         self.identify_conv = nn.Sequential(
-            nn.Conv2d(dim, dim, 3, padding=1, groups=dim),  # Depthwise
+            nn.Conv2d(dim, dim, 3, padding=1),
             nn.BatchNorm2d(dim),
             nn.ReLU(inplace=True),
-            nn.Conv2d(dim, dim, 1),  # Pointwise
+            nn.Conv2d(dim, dim, 1),
             nn.BatchNorm2d(dim),
             nn.ReLU(inplace=True)
         )
@@ -134,21 +135,25 @@ class ContrastEnhancementModule(nn.Module):
     """
     Enhances subtle differences between foreground and background
     Uses multi-scale contrast kernels specifically for COD
+    DataParallel-safe version without depthwise convolutions
     """
     def __init__(self, dim):
         super().__init__()
-        # Multi-scale contrast detection (depthwise separable for efficiency)
+        # Multi-scale contrast detection (regular convs for DataParallel compatibility)
         self.contrast_3x3 = nn.Sequential(
-            nn.Conv2d(dim, dim, 3, padding=1, groups=dim),
-            nn.Conv2d(dim, dim // 3, 1)
+            nn.Conv2d(dim, dim // 3, 3, padding=1),
+            nn.BatchNorm2d(dim // 3),
+            nn.ReLU(inplace=True)
         )
         self.contrast_5x5 = nn.Sequential(
-            nn.Conv2d(dim, dim, 5, padding=2, groups=dim),
-            nn.Conv2d(dim, dim // 3, 1)
+            nn.Conv2d(dim, dim // 3, 5, padding=2),
+            nn.BatchNorm2d(dim // 3),
+            nn.ReLU(inplace=True)
         )
         self.contrast_7x7 = nn.Sequential(
-            nn.Conv2d(dim, dim, 7, padding=3, groups=dim),
-            nn.Conv2d(dim, dim // 3, 1)
+            nn.Conv2d(dim, dim // 3, 7, padding=3),
+            nn.BatchNorm2d(dim // 3),
+            nn.ReLU(inplace=True)
         )
 
         # Contrast fusion
@@ -351,22 +356,20 @@ class CODEdgeExpert(nn.Module):
     """
     def __init__(self, dim):
         super().__init__()
-        # Learnable depthwise convolutions initialized as edge detectors
+        # Learnable edge detection (regular convs for DataParallel compatibility)
+        # Initialized with edge detection kernels
         self.horizontal_edge = nn.Sequential(
-            nn.Conv2d(dim, dim, 3, padding=1, groups=dim),  # Depthwise
-            nn.Conv2d(dim, dim // 4, 1),  # Pointwise
+            nn.Conv2d(dim, dim // 4, 3, padding=1),
             nn.BatchNorm2d(dim // 4),
             nn.ReLU(inplace=True)
         )
         self.vertical_edge = nn.Sequential(
-            nn.Conv2d(dim, dim, 3, padding=1, groups=dim),  # Depthwise
-            nn.Conv2d(dim, dim // 4, 1),  # Pointwise
+            nn.Conv2d(dim, dim // 4, 3, padding=1),
             nn.BatchNorm2d(dim // 4),
             nn.ReLU(inplace=True)
         )
         self.laplacian_edge = nn.Sequential(
-            nn.Conv2d(dim, dim, 3, padding=1, groups=dim),  # Depthwise
-            nn.Conv2d(dim, dim // 4, 1),  # Pointwise
+            nn.Conv2d(dim, dim // 4, 3, padding=1),
             nn.BatchNorm2d(dim // 4),
             nn.ReLU(inplace=True)
         )
@@ -381,49 +384,53 @@ class CODEdgeExpert(nn.Module):
             nn.ReLU(inplace=True)
         )
 
-        # Initialize depthwise convs with edge detection kernels
+        # Initialize edge convs with edge detection kernels
         self._init_edge_kernels()
 
     def _init_edge_kernels(self):
-        """Initialize depthwise convolutions with edge detection kernels"""
+        """Initialize convolutions with edge detection kernels"""
         # Sobel X kernel for horizontal edges
         sobel_x = torch.tensor([
             [-1, 0, 1],
             [-2, 0, 2],
             [-1, 0, 1]
-        ], dtype=torch.float32) / 4.0  # Normalize
+        ], dtype=torch.float32) / 8.0  # Normalize
 
         # Sobel Y kernel for vertical edges
         sobel_y = torch.tensor([
             [-1, -2, -1],
             [0, 0, 0],
             [1, 2, 1]
-        ], dtype=torch.float32) / 4.0  # Normalize
+        ], dtype=torch.float32) / 8.0  # Normalize
 
         # Laplacian kernel for edge detection
         laplacian = torch.tensor([
             [0, 1, 0],
             [1, -4, 1],
             [0, 1, 0]
-        ], dtype=torch.float32) / 4.0  # Normalize
+        ], dtype=torch.float32) / 8.0  # Normalize
 
         # Initialize horizontal edge detector with Sobel X
+        # For regular Conv2d: weight shape is [out_channels, in_channels, H, W]
         with torch.no_grad():
-            conv = self.horizontal_edge[0]  # Get depthwise conv
-            for i in range(conv.weight.shape[0]):
-                conv.weight[i, 0, :, :] = sobel_x
+            conv = self.horizontal_edge[0]  # Get conv layer
+            for out_c in range(conv.weight.shape[0]):
+                for in_c in range(conv.weight.shape[1]):
+                    conv.weight[out_c, in_c, :, :] = sobel_x
 
         # Initialize vertical edge detector with Sobel Y
         with torch.no_grad():
-            conv = self.vertical_edge[0]  # Get depthwise conv
-            for i in range(conv.weight.shape[0]):
-                conv.weight[i, 0, :, :] = sobel_y
+            conv = self.vertical_edge[0]  # Get conv layer
+            for out_c in range(conv.weight.shape[0]):
+                for in_c in range(conv.weight.shape[1]):
+                    conv.weight[out_c, in_c, :, :] = sobel_y
 
         # Initialize Laplacian edge detector
         with torch.no_grad():
-            conv = self.laplacian_edge[0]  # Get depthwise conv
-            for i in range(conv.weight.shape[0]):
-                conv.weight[i, 0, :, :] = laplacian
+            conv = self.laplacian_edge[0]  # Get conv layer
+            for out_c in range(conv.weight.shape[0]):
+                for in_c in range(conv.weight.shape[1]):
+                    conv.weight[out_c, in_c, :, :] = laplacian
 
     def forward(self, x):
         # Learnable edge detection - DataParallel safe
