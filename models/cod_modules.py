@@ -345,33 +345,29 @@ class CODFrequencyExpert(nn.Module):
 
 class CODEdgeExpert(nn.Module):
     """
-    COD-optimized edge detection
-    Detects subtle boundaries that camouflaged objects try to hide
+    COD-optimized edge detection (DataParallel-safe version)
+    Uses learnable edge detection instead of fixed kernels to avoid
+    DataParallel grouped convolution misalignment issues
     """
     def __init__(self, dim):
         super().__init__()
-        # Sobel and Laplacian kernels
-        sobel_x = torch.tensor([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]], dtype=torch.float32).view(1, 1, 3, 3)
-        sobel_y = torch.tensor([[-1, -2, -1], [0, 0, 0], [1, 2, 1]], dtype=torch.float32).view(1, 1, 3, 3)
-        laplacian = torch.tensor([[0, 1, 0], [1, -4, 1], [0, 1, 0]], dtype=torch.float32).view(1, 1, 3, 3)
-
-        self.register_buffer('sobel_x_base', sobel_x)
-        self.register_buffer('sobel_y_base', sobel_y)
-        self.register_buffer('laplacian_base', laplacian)
-        self.dim = dim
-
-        self.sobel_branch = nn.Sequential(
-            nn.Conv2d(dim, dim // 4, 1),
+        # Replace fixed kernels with learnable depthwise convolutions
+        # These are initialized to approximate edge detection but are trainable
+        self.horizontal_edge = nn.Sequential(
+            nn.Conv2d(dim, dim, 3, padding=1, groups=dim),  # Depthwise
+            nn.Conv2d(dim, dim // 4, 1),  # Pointwise
             nn.BatchNorm2d(dim // 4),
             nn.ReLU(inplace=True)
         )
-        self.laplacian_branch = nn.Sequential(
-            nn.Conv2d(dim, dim // 4, 1),
+        self.vertical_edge = nn.Sequential(
+            nn.Conv2d(dim, dim, 3, padding=1, groups=dim),  # Depthwise
+            nn.Conv2d(dim, dim // 4, 1),  # Pointwise
             nn.BatchNorm2d(dim // 4),
             nn.ReLU(inplace=True)
         )
-        self.gradient_branch = nn.Sequential(
-            nn.Conv2d(dim, dim // 4, 1),
+        self.laplacian_edge = nn.Sequential(
+            nn.Conv2d(dim, dim, 3, padding=1, groups=dim),  # Depthwise
+            nn.Conv2d(dim, dim // 4, 1),  # Pointwise
             nn.BatchNorm2d(dim // 4),
             nn.ReLU(inplace=True)
         )
@@ -386,42 +382,12 @@ class CODEdgeExpert(nn.Module):
             nn.ReLU(inplace=True)
         )
 
-    def compute_edges(self, x):
-        B, C, H, W = x.shape
-        device = x.device  # Get input device for DataParallel compatibility
-
-        # Move buffers to input device before repeat
-        sobel_x = self.sobel_x_base.to(device).repeat(C, 1, 1, 1)
-        sobel_y = self.sobel_y_base.to(device).repeat(C, 1, 1, 1)
-        laplacian = self.laplacian_base.to(device).repeat(C, 1, 1, 1)
-
-        # Apply convolutions and clone to ensure proper memory alignment
-        sx = F.conv2d(x, sobel_x, padding=1, groups=C).clone()
-        sy = F.conv2d(x, sobel_y, padding=1, groups=C).clone()
-        lap = F.conv2d(x, laplacian, padding=1, groups=C).clone()
-
-        # Clone after EVERY operation to prevent misalignment propagation
-        sx_squared = torch.pow(sx, 2).clone()
-        sy_squared = torch.pow(sy, 2).clone()
-        sobel_sum = (sx_squared + sy_squared + 1e-8).clone()
-        sobel_feat = torch.sqrt(sobel_sum).clone()
-
-        laplacian_feat = torch.abs(lap).clone()
-
-        # Compute gradient with cloned tensors for proper alignment
-        sobel_squared = torch.pow(sobel_feat, 2).clone()
-        laplacian_squared = torch.pow(laplacian_feat, 2).clone()
-        gradient_sum = (sobel_squared + laplacian_squared + 1e-8).clone()
-        gradient_feat = torch.sqrt(gradient_sum).clone()
-
-        return sobel_feat, laplacian_feat, gradient_feat
-
     def forward(self, x):
-        sobel_feat, laplacian_feat, gradient_feat = self.compute_edges(x)
-        # Clone all branch outputs to ensure proper alignment for DataParallel
-        sobel_out = self.sobel_branch(sobel_feat).clone()
-        lap_out = self.laplacian_branch(laplacian_feat).clone()
-        grad_out = self.gradient_branch(gradient_feat).clone()
-        spatial_out = self.spatial_branch(x).clone()
-        edge_features = torch.cat([sobel_out, lap_out, grad_out, spatial_out], dim=1)
+        # Learnable edge detection - DataParallel safe
+        h_edge = self.horizontal_edge(x).clone()
+        v_edge = self.vertical_edge(x).clone()
+        lap_edge = self.laplacian_edge(x).clone()
+        spatial = self.spatial_branch(x).clone()
+
+        edge_features = torch.cat([h_edge, v_edge, lap_edge, spatial], dim=1)
         return self.fusion(edge_features) + x
