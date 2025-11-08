@@ -357,7 +357,7 @@ class CODEdgeExpert(nn.Module):
     def __init__(self, dim):
         super().__init__()
         # Learnable edge detection (regular convs for DataParallel compatibility)
-        # Initialized with edge detection kernels
+        # Network will learn edge patterns during training
         self.horizontal_edge = nn.Sequential(
             nn.Conv2d(dim, dim // 4, 3, padding=1),
             nn.BatchNorm2d(dim // 4),
@@ -383,54 +383,6 @@ class CODEdgeExpert(nn.Module):
             nn.BatchNorm2d(dim),
             nn.ReLU(inplace=True)
         )
-
-        # Initialize edge convs with edge detection kernels
-        self._init_edge_kernels()
-
-    def _init_edge_kernels(self):
-        """Initialize convolutions with edge detection kernels"""
-        # Sobel X kernel for horizontal edges
-        sobel_x = torch.tensor([
-            [-1, 0, 1],
-            [-2, 0, 2],
-            [-1, 0, 1]
-        ], dtype=torch.float32) / 8.0  # Normalize
-
-        # Sobel Y kernel for vertical edges
-        sobel_y = torch.tensor([
-            [-1, -2, -1],
-            [0, 0, 0],
-            [1, 2, 1]
-        ], dtype=torch.float32) / 8.0  # Normalize
-
-        # Laplacian kernel for edge detection
-        laplacian = torch.tensor([
-            [0, 1, 0],
-            [1, -4, 1],
-            [0, 1, 0]
-        ], dtype=torch.float32) / 8.0  # Normalize
-
-        # Initialize horizontal edge detector with Sobel X
-        # For regular Conv2d: weight shape is [out_channels, in_channels, H, W]
-        with torch.no_grad():
-            conv = self.horizontal_edge[0]  # Get conv layer
-            for out_c in range(conv.weight.shape[0]):
-                for in_c in range(conv.weight.shape[1]):
-                    conv.weight[out_c, in_c, :, :] = sobel_x
-
-        # Initialize vertical edge detector with Sobel Y
-        with torch.no_grad():
-            conv = self.vertical_edge[0]  # Get conv layer
-            for out_c in range(conv.weight.shape[0]):
-                for in_c in range(conv.weight.shape[1]):
-                    conv.weight[out_c, in_c, :, :] = sobel_y
-
-        # Initialize Laplacian edge detector
-        with torch.no_grad():
-            conv = self.laplacian_edge[0]  # Get conv layer
-            for out_c in range(conv.weight.shape[0]):
-                for in_c in range(conv.weight.shape[1]):
-                    conv.weight[out_c, in_c, :, :] = laplacian
 
     def forward(self, x):
         # Learnable edge detection - DataParallel safe
