@@ -396,25 +396,23 @@ class CODEdgeExpert(nn.Module):
         laplacian = self.laplacian_base.to(device).repeat(C, 1, 1, 1)
 
         # Apply convolutions and clone to ensure proper memory alignment
-        # clone() forces a fresh memory allocation that is guaranteed to be contiguous
         sx = F.conv2d(x, sobel_x, padding=1, groups=C).clone()
         sy = F.conv2d(x, sobel_y, padding=1, groups=C).clone()
         lap = F.conv2d(x, laplacian, padding=1, groups=C).clone()
 
-        # Use torch.pow for better numerical stability and alignment
-        # Clone before and after operations to ensure proper memory layout
-        sx_squared = torch.pow(sx.clone(), 2)
-        sy_squared = torch.pow(sy.clone(), 2)
-        sobel_sum = sx_squared + sy_squared + 1e-8
-        sobel_feat = torch.sqrt(sobel_sum.clone())
+        # Clone after EVERY operation to prevent misalignment propagation
+        sx_squared = torch.pow(sx, 2).clone()
+        sy_squared = torch.pow(sy, 2).clone()
+        sobel_sum = (sx_squared + sy_squared + 1e-8).clone()
+        sobel_feat = torch.sqrt(sobel_sum).clone()
 
-        laplacian_feat = torch.abs(lap.clone())
+        laplacian_feat = torch.abs(lap).clone()
 
         # Compute gradient with cloned tensors for proper alignment
-        sobel_squared = torch.pow(sobel_feat.clone(), 2)
-        laplacian_squared = torch.pow(laplacian_feat.clone(), 2)
-        gradient_sum = sobel_squared + laplacian_squared + 1e-8
-        gradient_feat = torch.sqrt(gradient_sum.clone())
+        sobel_squared = torch.pow(sobel_feat, 2).clone()
+        laplacian_squared = torch.pow(laplacian_feat, 2).clone()
+        gradient_sum = (sobel_squared + laplacian_squared + 1e-8).clone()
+        gradient_feat = torch.sqrt(gradient_sum).clone()
 
         return sobel_feat, laplacian_feat, gradient_feat
 
