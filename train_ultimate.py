@@ -467,7 +467,19 @@ def train(args):
             # Remove 'module.' prefix from all keys
             state_dict = {k.replace('module.', ''): v for k, v in state_dict.items()}
 
-        model.load_state_dict(state_dict)
+        # Load state dict with strict=False to handle architecture mismatches
+        # This allows partial loading when model architecture has changed
+        missing_keys, unexpected_keys = model.load_state_dict(state_dict, strict=False)
+
+        if missing_keys or unexpected_keys:
+            print(f"⚠️  Architecture mismatch detected during checkpoint loading:")
+            if missing_keys:
+                print(f"   Missing keys in checkpoint: {len(missing_keys)} keys")
+                print(f"   (These will be randomly initialized)")
+            if unexpected_keys:
+                print(f"   Unexpected keys in checkpoint: {len(unexpected_keys)} keys")
+                print(f"   (These will be ignored)")
+            print(f"   ✓ Loaded matching weights, continuing with partial checkpoint")
 
         if ema and checkpoint.get('ema_state_dict'):
             ema.shadow = checkpoint['ema_state_dict']
