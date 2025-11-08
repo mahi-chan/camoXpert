@@ -15,7 +15,7 @@ def transfer_weights(small_model_path, base_model, device='cuda', verbose=True):
     print("TRANSFERRING WEIGHTS: SMALL → BASE-USI")
     print("=" * 70)
 
-    checkpoint = torch.load(small_model_path, map_location=device)
+    checkpoint = torch.load(small_model_path, map_location=device, weights_only=False)
     small_state_dict = checkpoint['model_state_dict']
     base_state_dict = base_model.state_dict()
 

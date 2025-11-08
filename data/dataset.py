@@ -7,11 +7,12 @@ from albumentations.pytorch import ToTensorV2
 
 
 class COD10KDataset(Dataset):
-    def __init__(self, root_dir, split='train', img_size=352, augment=True):
+    def __init__(self, root_dir, split='train', img_size=352, augment=True, cache_in_memory=True):
         self.root_dir = root_dir
         self.split = split
         self.img_size = img_size
         self.augment = augment and split == 'train'
+        self.cache_in_memory = cache_in_memory
 
         # Try multiple possible directory structures
         possible_structures = [
@@ -90,19 +91,56 @@ class COD10KDataset(Dataset):
         print(f"  Image dir: {self.image_dir}")
         print(f"  Mask dir:  {self.mask_dir}")
 
+        # Cache RESIZED images and masks in memory (much smaller!)
+        # Caching full-size images uses too much RAM
+        self.image_cache = {}
+        self.mask_cache = {}
+
+        if self.cache_in_memory:
+            print(f"  Caching {len(self.image_list)} RESIZED images ({img_size}px) in RAM...")
+            from tqdm import tqdm
+            for img_name in tqdm(self.image_list, desc=f"Loading {split}"):
+                # Load image
+                img_path = os.path.join(self.image_dir, img_name)
+                image = cv2.imread(img_path)
+                if image is None:
+                    raise ValueError(f"Failed to load image: {img_path}")
+                image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+                # RESIZE NOW to save RAM (320x320 vs 400x600 = 60% smaller!)
+                image = cv2.resize(image, (img_size, img_size), interpolation=cv2.INTER_LINEAR)
+                self.image_cache[img_name] = image  # Keep as uint8 (4x smaller than float32)
+
+                # Load mask
+                mask_extensions = ['.png', '.jpg', '.jpeg', '.PNG', '.JPG']
+                base_name = os.path.splitext(img_name)[0]
+                mask = None
+                for ext in mask_extensions:
+                    mask_path = os.path.join(self.mask_dir, base_name + ext)
+                    if os.path.exists(mask_path):
+                        mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
+                        break
+                if mask is None:
+                    raise ValueError(f"Failed to load mask for: {img_name}")
+                # RESIZE mask too
+                mask = cv2.resize(mask, (img_size, img_size), interpolation=cv2.INTER_NEAREST)
+                self.mask_cache[img_name] = (mask > 128).astype(np.float32)
+
+            mem_mb = len(self.image_cache) * img_size * img_size * 3 / (1024**2)
+            print(f"  ✓ Cached {len(self.image_cache)} images in RAM (~{mem_mb:.0f}MB)")
+
         if self.augment:
+            # NO RESIZE in transform - already done in cache!
             self.transform = A.Compose([
-                A.Resize(img_size, img_size),
                 A.HorizontalFlip(p=0.5),
                 A.VerticalFlip(p=0.2),
                 A.RandomRotate90(p=0.2),
-                A.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.2, hue=0.1, p=0.5),
+                A.ColorJitter(brightness=0.1, contrast=0.1, saturation=0.1, p=0.2),
                 A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
                 ToTensorV2()
             ])
         else:
+            # NO RESIZE in transform - already done in cache!
             self.transform = A.Compose([
-                A.Resize(img_size, img_size),
                 A.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
                 ToTensorV2()
             ])
@@ -112,27 +150,34 @@ class COD10KDataset(Dataset):
 
     def __getitem__(self, idx):
         img_name = self.image_list[idx]
-        img_path = os.path.join(self.image_dir, img_name)
-        image = cv2.imread(img_path)
-        if image is None:
-            raise ValueError(f"Failed to load image: {img_path}")
-        image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
 
-        # Try multiple mask extensions
-        mask_extensions = ['.png', '.jpg', '.jpeg', '.PNG', '.JPG']
-        base_name = os.path.splitext(img_name)[0]
+        if self.cache_in_memory:
+            # Get from RAM cache (fast!)
+            image = self.image_cache[img_name].copy()  # Copy to avoid modifying cache
+            mask = self.mask_cache[img_name].copy()
+        else:
+            # Load from disk (slow - fallback only)
+            img_path = os.path.join(self.image_dir, img_name)
+            image = cv2.imread(img_path)
+            if image is None:
+                raise ValueError(f"Failed to load image: {img_path}")
+            image = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
 
-        mask = None
-        for ext in mask_extensions:
-            mask_path = os.path.join(self.mask_dir, base_name + ext)
-            if os.path.exists(mask_path):
-                mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
-                break
+            # Try multiple mask extensions
+            mask_extensions = ['.png', '.jpg', '.jpeg', '.PNG', '.JPG']
+            base_name = os.path.splitext(img_name)[0]
 
-        if mask is None:
-            raise ValueError(f"Failed to load mask for: {img_name}")
+            mask = None
+            for ext in mask_extensions:
+                mask_path = os.path.join(self.mask_dir, base_name + ext)
+                if os.path.exists(mask_path):
+                    mask = cv2.imread(mask_path, cv2.IMREAD_GRAYSCALE)
+                    break
 
-        mask = (mask > 128).astype(np.float32)
+            if mask is None:
+                raise ValueError(f"Failed to load mask for: {img_name}")
+
+            mask = (mask > 128).astype(np.float32)
 
         transformed = self.transform(image=image, mask=mask)
         return transformed['image'], transformed['mask'].unsqueeze(0)
