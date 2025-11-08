@@ -393,25 +393,26 @@ class CODEdgeExpert(nn.Module):
         sobel_y = self.sobel_y_base.to(device).repeat(C, 1, 1, 1)
         laplacian = self.laplacian_base.to(device).repeat(C, 1, 1, 1)
 
-        # Make outputs contiguous to prevent misaligned address errors with DataParallel
-        sx = F.conv2d(x, sobel_x, padding=1, groups=C).contiguous()
-        sy = F.conv2d(x, sobel_y, padding=1, groups=C).contiguous()
-        lap = F.conv2d(x, laplacian, padding=1, groups=C).contiguous()
+        # Apply convolutions and clone to ensure proper memory alignment
+        # clone() forces a fresh memory allocation that is guaranteed to be contiguous
+        sx = F.conv2d(x, sobel_x, padding=1, groups=C).clone()
+        sy = F.conv2d(x, sobel_y, padding=1, groups=C).clone()
+        lap = F.conv2d(x, laplacian, padding=1, groups=C).clone()
 
-        # Ensure all intermediate tensors are contiguous for DataParallel
-        # Break down operations to prevent misaligned address errors
-        sx_squared = (sx ** 2).contiguous()
-        sy_squared = (sy ** 2).contiguous()
-        sobel_sum = (sx_squared + sy_squared + 1e-8).contiguous()
-        sobel_feat = torch.sqrt(sobel_sum).contiguous()
+        # Use torch.pow for better numerical stability and alignment
+        # Clone before and after operations to ensure proper memory layout
+        sx_squared = torch.pow(sx.clone(), 2)
+        sy_squared = torch.pow(sy.clone(), 2)
+        sobel_sum = sx_squared + sy_squared + 1e-8
+        sobel_feat = torch.sqrt(sobel_sum.clone())
 
-        laplacian_feat = torch.abs(lap).contiguous()
+        laplacian_feat = torch.abs(lap.clone())
 
-        # Compute gradient with explicit contiguous calls
-        sobel_squared = (sobel_feat ** 2).contiguous()
-        laplacian_squared = (laplacian_feat ** 2).contiguous()
-        gradient_sum = (sobel_squared + laplacian_squared + 1e-8).contiguous()
-        gradient_feat = torch.sqrt(gradient_sum).contiguous()
+        # Compute gradient with cloned tensors for proper alignment
+        sobel_squared = torch.pow(sobel_feat.clone(), 2)
+        laplacian_squared = torch.pow(laplacian_feat.clone(), 2)
+        gradient_sum = sobel_squared + laplacian_squared + 1e-8
+        gradient_feat = torch.sqrt(gradient_sum.clone())
 
         return sobel_feat, laplacian_feat, gradient_feat
 
