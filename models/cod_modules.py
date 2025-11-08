@@ -346,13 +346,12 @@ class CODFrequencyExpert(nn.Module):
 class CODEdgeExpert(nn.Module):
     """
     COD-optimized edge detection (DataParallel-safe version)
-    Uses learnable edge detection instead of fixed kernels to avoid
+    Uses learnable edge detection initialized with edge kernels to avoid
     DataParallel grouped convolution misalignment issues
     """
     def __init__(self, dim):
         super().__init__()
-        # Replace fixed kernels with learnable depthwise convolutions
-        # These are initialized to approximate edge detection but are trainable
+        # Learnable depthwise convolutions initialized as edge detectors
         self.horizontal_edge = nn.Sequential(
             nn.Conv2d(dim, dim, 3, padding=1, groups=dim),  # Depthwise
             nn.Conv2d(dim, dim // 4, 1),  # Pointwise
@@ -381,6 +380,50 @@ class CODEdgeExpert(nn.Module):
             nn.BatchNorm2d(dim),
             nn.ReLU(inplace=True)
         )
+
+        # Initialize depthwise convs with edge detection kernels
+        self._init_edge_kernels()
+
+    def _init_edge_kernels(self):
+        """Initialize depthwise convolutions with edge detection kernels"""
+        # Sobel X kernel for horizontal edges
+        sobel_x = torch.tensor([
+            [-1, 0, 1],
+            [-2, 0, 2],
+            [-1, 0, 1]
+        ], dtype=torch.float32) / 4.0  # Normalize
+
+        # Sobel Y kernel for vertical edges
+        sobel_y = torch.tensor([
+            [-1, -2, -1],
+            [0, 0, 0],
+            [1, 2, 1]
+        ], dtype=torch.float32) / 4.0  # Normalize
+
+        # Laplacian kernel for edge detection
+        laplacian = torch.tensor([
+            [0, 1, 0],
+            [1, -4, 1],
+            [0, 1, 0]
+        ], dtype=torch.float32) / 4.0  # Normalize
+
+        # Initialize horizontal edge detector with Sobel X
+        with torch.no_grad():
+            conv = self.horizontal_edge[0]  # Get depthwise conv
+            for i in range(conv.weight.shape[0]):
+                conv.weight[i, 0, :, :] = sobel_x
+
+        # Initialize vertical edge detector with Sobel Y
+        with torch.no_grad():
+            conv = self.vertical_edge[0]  # Get depthwise conv
+            for i in range(conv.weight.shape[0]):
+                conv.weight[i, 0, :, :] = sobel_y
+
+        # Initialize Laplacian edge detector
+        with torch.no_grad():
+            conv = self.laplacian_edge[0]  # Get depthwise conv
+            for i in range(conv.weight.shape[0]):
+                conv.weight[i, 0, :, :] = laplacian
 
     def forward(self, x):
         # Learnable edge detection - DataParallel safe
