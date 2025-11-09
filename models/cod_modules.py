@@ -271,23 +271,24 @@ class CODTextureExpert(nn.Module):
 
 class CODFrequencyExpert(nn.Module):
     """
-    COD-optimized frequency domain analysis
-    Separates texture frequencies to detect camouflaged patterns
+    COD-optimized frequency domain analysis (simplified for DataParallel)
+    Uses direct convolutions instead of frequency separation arithmetic
     """
     def __init__(self, dim):
         super().__init__()
-        self.low_freq_conv = nn.Sequential(
-            nn.Conv2d(dim, dim // 4, 1),
+        # Replace frequency separation with direct multi-scale convolutions
+        self.scale1_conv = nn.Sequential(
+            nn.Conv2d(dim, dim // 4, 3, padding=1),
             nn.BatchNorm2d(dim // 4),
             nn.ReLU(inplace=True)
         )
-        self.mid_freq_conv = nn.Sequential(
-            nn.Conv2d(dim, dim // 4, 1),
+        self.scale2_conv = nn.Sequential(
+            nn.Conv2d(dim, dim // 4, 5, padding=2),
             nn.BatchNorm2d(dim // 4),
             nn.ReLU(inplace=True)
         )
-        self.high_freq_conv = nn.Sequential(
-            nn.Conv2d(dim, dim // 4, 1),
+        self.scale3_conv = nn.Sequential(
+            nn.Conv2d(dim, dim // 4, 7, padding=3),
             nn.BatchNorm2d(dim // 4),
             nn.ReLU(inplace=True)
         )
@@ -303,17 +304,13 @@ class CODFrequencyExpert(nn.Module):
         )
 
     def forward(self, x):
-        low_freq = F.avg_pool2d(x, kernel_size=3, stride=1, padding=1)
-        high_freq = x - low_freq
-        mid_freq_blur1 = F.avg_pool2d(x, kernel_size=3, stride=1, padding=1)
-        mid_freq_blur2 = F.avg_pool2d(x, kernel_size=5, stride=1, padding=2)
-        mid_freq = mid_freq_blur1 - mid_freq_blur2
-        low_feat = self.low_freq_conv(low_freq)
-        mid_feat = self.mid_freq_conv(mid_freq)
-        high_feat = self.high_freq_conv(high_freq)
-        spatial_feat = self.spatial_conv(x)
-        freq_features = torch.cat([low_feat, mid_feat, high_feat, spatial_feat], dim=1)
-        return self.fusion(freq_features) + x
+        # Multi-scale feature extraction (no arithmetic operations)
+        feat1 = self.scale1_conv(x)
+        feat2 = self.scale2_conv(x)
+        feat3 = self.scale3_conv(x)
+        spatial = self.spatial_conv(x)
+        features = torch.cat([feat1, feat2, feat3, spatial], dim=1)
+        return self.fusion(features) + x
 
 
 class CODEdgeExpert(nn.Module):
