@@ -168,12 +168,22 @@ def enable_gradient_checkpointing(model):
 
         return checkpointed_forward
 
+    # Checkpoint memory-intensive modules
+    # For COD: expert modules, decoder blocks, refinement modules, contrast enhancement
+    checkpoint_patterns = ['expert', 'decoder', 'refinement', 'contrast', 'moe', 'sdta']
+
     for name, module in model.named_modules():
-        if 'moe' in name.lower() or 'sdta' in name.lower():
-            if hasattr(module, 'forward'):
-                original_forward = module.forward
-                module.forward = make_checkpointed_forward(original_forward).__get__(module, type(module))
-                checkpointed += 1
+        # Check if module name contains any checkpoint pattern
+        should_checkpoint = any(pattern in name.lower() for pattern in checkpoint_patterns)
+
+        if should_checkpoint and hasattr(module, 'forward'):
+            # Skip if it's a container module (Sequential, ModuleList, etc.)
+            if isinstance(module, (nn.Sequential, nn.ModuleList, nn.ModuleDict)):
+                continue
+
+            original_forward = module.forward
+            module.forward = make_checkpointed_forward(original_forward).__get__(module, type(module))
+            checkpointed += 1
 
     print(f"✓ Checkpointed {checkpointed} modules")
     return model

@@ -1,20 +1,20 @@
-# Training Commands - Single GPU vs DDP
+# Training Commands - DDP Multi-GPU Configuration
 
-## Your Custom Configuration - DDP Multi-GPU ⚡
+## ⚠️ IMPORTANT: Memory-Optimized Settings for Tesla T4
 
-### Quick Start (Choose One):
+**Batch size 32 with FP32 (--no-amp) causes OOM errors on Tesla T4!**
 
-**Option 1: Python Launcher**
+### Recommended Configuration (Memory Safe):
+
+**Option 1: Python Launcher (Recommended)**
 ```bash
 python launch_ddp_custom.py
 ```
+- Batch size: 20 per GPU (40 total)
+- Mixed precision (AMP): **Enabled** (saves ~40% memory)
+- Gradient checkpointing: **Enabled** (saves ~30% memory)
 
-**Option 2: Shell Script**
-```bash
-bash train_ddp_custom.sh
-```
-
-**Option 3: Direct Command**
+**Option 2: Direct Command (Full Control)**
 ```bash
 torchrun --nproc_per_node=2 --master_port=29500 train_ultimate.py train \
     --use-ddp \
@@ -22,8 +22,8 @@ torchrun --nproc_per_node=2 --master_port=29500 train_ultimate.py train \
     --checkpoint-dir /kaggle/working/checkpoints_cod_specialized \
     --backbone edgenext_base \
     --num-experts 7 \
-    --batch-size 32 \
-    --stage2-batch-size 24 \
+    --batch-size 20 \
+    --stage2-batch-size 16 \
     --accumulation-steps 1 \
     --img-size 352 \
     --epochs 150 \
@@ -34,24 +34,33 @@ torchrun --nproc_per_node=2 --master_port=29500 train_ultimate.py train \
     --min-lr 0.00001 \
     --warmup-epochs 5 \
     --deep-supervision \
+    --gradient-checkpointing \
     --num-workers 4 \
-    --no-amp \
     --use-cod-specialized
 ```
+**Note**: Removed `--no-amp` to enable mixed precision (critical for memory)
 
 ---
 
 ## Batch Size Explained
 
-### Your Original Configuration (Single GPU):
-- **Stage 1**: Batch size 64
-- **Stage 2**: Batch size 48
+### Memory-Optimized DDP Configuration (2 GPUs):
+- **Stage 1**: 20 **per GPU** × 2 GPUs = **40 total**
+- **Stage 2**: 16 **per GPU** × 2 GPUs = **32 total**
 
-### DDP Configuration (2 GPUs):
-- **Stage 1**: 32 **per GPU** × 2 GPUs = **64 total** ✅
-- **Stage 2**: 24 **per GPU** × 2 GPUs = **48 total** ✅
+**With mixed precision (AMP) + gradient checkpointing:**
+- Fits comfortably in Tesla T4's 15 GB VRAM
+- Still large enough for stable training
+- ~70% memory savings vs FP32
 
-**Same effective batch size, but distributed across GPUs!**
+### Batch Size Options for Tesla T4:
+
+| Batch/GPU | Total (2 GPUs) | Precision | Status |
+|-----------|----------------|-----------|--------|
+| 32 | 64 | FP32 (--no-amp) | ❌ **OOM Error** |
+| 24 | 48 | FP32 (--no-amp) | ⚠️ **Risky** (~14.5 GB) |
+| 20 | 40 | **Mixed (AMP)** | ✅ **Recommended** (~10 GB) |
+| 16 | 32 | Mixed (AMP) | ✅ Safe (~8 GB) |
 
 ---
 
@@ -60,15 +69,16 @@ torchrun --nproc_per_node=2 --master_port=29500 train_ultimate.py train \
 | Setting | Value | Description |
 |---------|-------|-------------|
 | **GPUs** | 2 × Tesla T4 | DistributedDataParallel |
-| **Batch (S1)** | 64 total | 32 per GPU |
-| **Batch (S2)** | 48 total | 24 per GPU |
+| **Batch (S1)** | 40 total | 20 per GPU |
+| **Batch (S2)** | 32 total | 16 per GPU |
 | **Resolution** | 352×352 | Optimal for COD |
 | **Epochs** | 150 | 30 decoder + 120 full |
 | **LR (S1)** | 0.0008 | With warmup |
 | **LR (S2)** | 0.00055 | Fine-tuning rate |
 | **Scheduler** | Cosine | With min_lr 1e-5 |
 | **Warmup** | 5 epochs | Stage 2 only |
-| **Precision** | FP32 | More stable (--no-amp) |
+| **Precision** | Mixed (FP16/32) | AMP enabled for memory |
+| **Checkpointing** | Enabled | Saves ~30% memory |
 | **Deep Sup** | Enabled | 3 supervision levels |
 
 ---
@@ -139,9 +149,24 @@ torchrun --nproc_per_node=2 --master_port=29501 train_ultimate.py train --use-dd
 ```
 
 ### OOM (Out of Memory)
+
+**Option 1: Enable AMP (Recommended)**
 ```bash
-# Reduce batch size
---batch-size 24 --stage2-batch-size 18
+# Remove --no-amp flag to enable mixed precision
+# This saves ~40% memory!
+torchrun --nproc_per_node=2 train_ultimate.py train --use-ddp ... (remove --no-amp)
+```
+
+**Option 2: Reduce Batch Size**
+```bash
+# Use smaller batch
+--batch-size 16 --stage2-batch-size 12 --gradient-checkpointing
+```
+
+**Option 3: Both (Maximum Memory Savings)**
+```bash
+# Combine AMP + smaller batch + checkpointing
+--batch-size 16 --gradient-checkpointing (no --no-amp flag)
 ```
 
 ### NCCL Timeout

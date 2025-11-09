@@ -1,12 +1,14 @@
 #!/bin/bash
-# Custom DDP Training Script with Your Exact Configuration
+# Memory-Optimized DDP Training Script for Tesla T4
 # Run with: bash train_ddp_custom.sh
 
 echo "=================================================="
-echo "CAMOXPERT DDP TRAINING - CUSTOM CONFIGURATION"
+echo "CAMOXPERT DDP TRAINING - MEMORY OPTIMIZED"
 echo "=================================================="
 echo "GPUs: 2 × Tesla T4"
-echo "Total Batch: Stage 1 = 64, Stage 2 = 48"
+echo "Total Batch: Stage 1 = 40, Stage 2 = 32"
+echo "Mixed Precision: Enabled (AMP)"
+echo "Gradient Checkpointing: Enabled"
 echo "Resolution: 352px"
 echo "Epochs: 150 (30 decoder + 120 full)"
 echo "=================================================="
@@ -18,8 +20,8 @@ torchrun --nproc_per_node=2 --master_port=29500 train_ultimate.py train \
     --checkpoint-dir /kaggle/working/checkpoints_cod_specialized \
     --backbone edgenext_base \
     --num-experts 7 \
-    --batch-size 32 \
-    --stage2-batch-size 24 \
+    --batch-size 20 \
+    --stage2-batch-size 16 \
     --accumulation-steps 1 \
     --img-size 352 \
     --epochs 150 \
@@ -30,8 +32,8 @@ torchrun --nproc_per_node=2 --master_port=29500 train_ultimate.py train \
     --min-lr 0.00001 \
     --warmup-epochs 5 \
     --deep-supervision \
+    --gradient-checkpointing \
     --num-workers 4 \
-    --no-amp \
     --use-cod-specialized
 
 echo ""
