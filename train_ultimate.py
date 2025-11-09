@@ -488,8 +488,9 @@ def train(args):
         if is_main_process:
             for i in range(n_gpus):
                 print(f"   GPU {i}: {torch.cuda.get_device_name(i)}")
+        # Enable find_unused_parameters for staged training (backbone frozen in stage 1)
         model = DDP(model, device_ids=[args.local_rank], output_device=args.local_rank,
-                   find_unused_parameters=False)
+                   find_unused_parameters=True)
         if is_main_process:
             print(f"   Batch per GPU: {args.batch_size}")
             print(f"   Total batch: {args.batch_size * n_gpus}\n")
