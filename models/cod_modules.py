@@ -130,20 +130,25 @@ class ContrastEnhancementModule(nn.Module):
     """
     def __init__(self, dim):
         super().__init__()
+        # Calculate channel splits that sum exactly to dim
+        c1 = dim // 3
+        c2 = dim // 3
+        c3 = dim - c1 - c2  # Remainder goes to third branch
+
         # Multi-scale contrast detection (regular convs for DataParallel compatibility)
         self.contrast_3x3 = nn.Sequential(
-            nn.Conv2d(dim, dim // 3, 3, padding=1),
-            nn.BatchNorm2d(dim // 3),
+            nn.Conv2d(dim, c1, 3, padding=1),
+            nn.BatchNorm2d(c1),
             nn.ReLU(inplace=True)
         )
         self.contrast_5x5 = nn.Sequential(
-            nn.Conv2d(dim, dim // 3, 5, padding=2),
-            nn.BatchNorm2d(dim // 3),
+            nn.Conv2d(dim, c2, 5, padding=2),
+            nn.BatchNorm2d(c2),
             nn.ReLU(inplace=True)
         )
         self.contrast_7x7 = nn.Sequential(
-            nn.Conv2d(dim, dim // 3, 7, padding=3),
-            nn.BatchNorm2d(dim // 3),
+            nn.Conv2d(dim, c3, 7, padding=3),
+            nn.BatchNorm2d(c3),
             nn.ReLU(inplace=True)
         )
 
@@ -229,29 +234,35 @@ class CODTextureExpert(nn.Module):
     """
     def __init__(self, dim):
         super().__init__()
+        # Calculate channel splits that sum exactly to dim
+        c1 = dim // 4
+        c2 = dim // 4
+        c3 = dim // 4
+        c4 = dim - c1 - c2 - c3  # Remainder goes to fourth branch
+
         # Adaptive dilations for texture at different scales
         self.branch1 = nn.Sequential(
-            nn.Conv2d(dim, dim // 4, 1),
-            nn.Conv2d(dim // 4, dim // 4, 3, padding=1, dilation=1),
-            nn.BatchNorm2d(dim // 4),
+            nn.Conv2d(dim, c1, 1),
+            nn.Conv2d(c1, c1, 3, padding=1, dilation=1),
+            nn.BatchNorm2d(c1),
             nn.ReLU(inplace=True)
         )
         self.branch2 = nn.Sequential(
-            nn.Conv2d(dim, dim // 4, 1),
-            nn.Conv2d(dim // 4, dim // 4, 3, padding=2, dilation=2),
-            nn.BatchNorm2d(dim // 4),
+            nn.Conv2d(dim, c2, 1),
+            nn.Conv2d(c2, c2, 3, padding=2, dilation=2),
+            nn.BatchNorm2d(c2),
             nn.ReLU(inplace=True)
         )
         self.branch3 = nn.Sequential(
-            nn.Conv2d(dim, dim // 4, 1),
-            nn.Conv2d(dim // 4, dim // 4, 3, padding=4, dilation=4),
-            nn.BatchNorm2d(dim // 4),
+            nn.Conv2d(dim, c3, 1),
+            nn.Conv2d(c3, c3, 3, padding=4, dilation=4),
+            nn.BatchNorm2d(c3),
             nn.ReLU(inplace=True)
         )
         self.branch4 = nn.Sequential(
-            nn.Conv2d(dim, dim // 4, 1),
-            nn.Conv2d(dim // 4, dim // 4, 3, padding=8, dilation=8),
-            nn.BatchNorm2d(dim // 4),
+            nn.Conv2d(dim, c4, 1),
+            nn.Conv2d(c4, c4, 3, padding=8, dilation=8),
+            nn.BatchNorm2d(c4),
             nn.ReLU(inplace=True)
         )
         self.fusion = nn.Sequential(
@@ -276,25 +287,31 @@ class CODFrequencyExpert(nn.Module):
     """
     def __init__(self, dim):
         super().__init__()
+        # Calculate channel splits that sum exactly to dim
+        c1 = dim // 4
+        c2 = dim // 4
+        c3 = dim // 4
+        c4 = dim - c1 - c2 - c3  # Remainder goes to fourth branch
+
         # Replace frequency separation with direct multi-scale convolutions
         self.scale1_conv = nn.Sequential(
-            nn.Conv2d(dim, dim // 4, 3, padding=1),
-            nn.BatchNorm2d(dim // 4),
+            nn.Conv2d(dim, c1, 3, padding=1),
+            nn.BatchNorm2d(c1),
             nn.ReLU(inplace=True)
         )
         self.scale2_conv = nn.Sequential(
-            nn.Conv2d(dim, dim // 4, 5, padding=2),
-            nn.BatchNorm2d(dim // 4),
+            nn.Conv2d(dim, c2, 5, padding=2),
+            nn.BatchNorm2d(c2),
             nn.ReLU(inplace=True)
         )
         self.scale3_conv = nn.Sequential(
-            nn.Conv2d(dim, dim // 4, 7, padding=3),
-            nn.BatchNorm2d(dim // 4),
+            nn.Conv2d(dim, c3, 7, padding=3),
+            nn.BatchNorm2d(c3),
             nn.ReLU(inplace=True)
         )
         self.spatial_conv = nn.Sequential(
-            nn.Conv2d(dim, dim // 4, 1),
-            nn.BatchNorm2d(dim // 4),
+            nn.Conv2d(dim, c4, 1),
+            nn.BatchNorm2d(c4),
             nn.ReLU(inplace=True)
         )
         self.fusion = nn.Sequential(
@@ -321,26 +338,32 @@ class CODEdgeExpert(nn.Module):
     """
     def __init__(self, dim):
         super().__init__()
+        # Calculate channel splits that sum exactly to dim
+        c1 = dim // 4
+        c2 = dim // 4
+        c3 = dim // 4
+        c4 = dim - c1 - c2 - c3  # Remainder goes to fourth branch
+
         # Learnable edge detection (regular convs for DataParallel compatibility)
         # Network will learn edge patterns during training
         self.horizontal_edge = nn.Sequential(
-            nn.Conv2d(dim, dim // 4, 3, padding=1),
-            nn.BatchNorm2d(dim // 4),
+            nn.Conv2d(dim, c1, 3, padding=1),
+            nn.BatchNorm2d(c1),
             nn.ReLU(inplace=True)
         )
         self.vertical_edge = nn.Sequential(
-            nn.Conv2d(dim, dim // 4, 3, padding=1),
-            nn.BatchNorm2d(dim // 4),
+            nn.Conv2d(dim, c2, 3, padding=1),
+            nn.BatchNorm2d(c2),
             nn.ReLU(inplace=True)
         )
         self.laplacian_edge = nn.Sequential(
-            nn.Conv2d(dim, dim // 4, 3, padding=1),
-            nn.BatchNorm2d(dim // 4),
+            nn.Conv2d(dim, c3, 3, padding=1),
+            nn.BatchNorm2d(c3),
             nn.ReLU(inplace=True)
         )
         self.spatial_branch = nn.Sequential(
-            nn.Conv2d(dim, dim // 4, 1),
-            nn.BatchNorm2d(dim // 4),
+            nn.Conv2d(dim, c4, 1),
+            nn.BatchNorm2d(c4),
             nn.ReLU(inplace=True)
         )
         self.fusion = nn.Sequential(
