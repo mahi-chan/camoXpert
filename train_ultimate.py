@@ -6,7 +6,10 @@ import os
 import sys
 import torch
 import torch.nn as nn
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
+from torch.utils.data.distributed import DistributedSampler
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import OneCycleLR, CosineAnnealingLR, CosineAnnealingWarmRestarts
 import json
@@ -70,6 +73,12 @@ def parse_args():
     parser.add_argument('--use-cod-specialized', action='store_true', default=False,
                         help='Use 100%% COD-specialized architecture (recommended for best results)')
 
+    # DDP arguments
+    parser.add_argument('--use-ddp', action='store_true', default=False,
+                        help='Use DistributedDataParallel for multi-GPU training (recommended over DataParallel)')
+    parser.add_argument('--local_rank', type=int, default=-1,
+                        help='Local rank for distributed training (auto-set by torch.distributed.launch)')
+
     return parser.parse_args()
 
 
@@ -98,6 +107,35 @@ class EMA:
         for name, param in self.model.named_parameters():
             if param.requires_grad:
                 param.data = self.backup[name]
+
+
+def setup_ddp(args):
+    """Initialize DistributedDataParallel"""
+    if 'RANK' in os.environ and 'WORLD_SIZE' in os.environ:
+        args.rank = int(os.environ["RANK"])
+        args.world_size = int(os.environ["WORLD_SIZE"])
+        args.local_rank = int(os.environ["LOCAL_RANK"])
+    elif 'SLURM_PROCID' in os.environ:
+        args.rank = int(os.environ['SLURM_PROCID'])
+        args.local_rank = args.rank % torch.cuda.device_count()
+    elif hasattr(args, 'rank'):
+        pass
+    else:
+        args.rank = 0
+        args.world_size = 1
+        args.local_rank = 0
+
+    torch.cuda.set_device(args.local_rank)
+    dist.init_process_group(backend='nccl', init_method='env://',
+                           world_size=args.world_size, rank=args.rank)
+    dist.barrier()
+    return args.rank == 0  # is_main_process
+
+
+def cleanup_ddp():
+    """Cleanup DDP"""
+    if dist.is_initialized():
+        dist.destroy_process_group()
 
 
 def clear_gpu_memory():
@@ -389,12 +427,23 @@ def train(args):
     train_data = COD10KDataset(args.dataset_path, 'train', args.img_size, augment=True)
     val_data = COD10KDataset(args.dataset_path, 'val', args.img_size, augment=False)
 
-    train_loader = DataLoader(train_data, args.batch_size, shuffle=True,
+    # Create samplers for DDP if enabled
+    train_sampler = None
+    val_sampler = None
+    if args.use_ddp and torch.cuda.device_count() > 1:
+        train_sampler = DistributedSampler(train_data, shuffle=True)
+        val_sampler = DistributedSampler(val_data, shuffle=False)
+
+    train_loader = DataLoader(train_data, args.batch_size,
+                              shuffle=(train_sampler is None),  # Don't shuffle if using sampler
+                              sampler=train_sampler,
                               num_workers=args.num_workers, pin_memory=True, drop_last=True,
                               persistent_workers=True if args.num_workers > 0 else False,
                               prefetch_factor=3,
                               multiprocessing_context='fork' if args.num_workers > 0 else None)
-    val_loader = DataLoader(val_data, args.batch_size, shuffle=False,
+    val_loader = DataLoader(val_data, args.batch_size,
+                            shuffle=False,
+                            sampler=val_sampler,
                             num_workers=args.num_workers, pin_memory=True,
                             persistent_workers=True if args.num_workers > 0 else False,
                             prefetch_factor=2,
@@ -410,25 +459,40 @@ def train(args):
         print("📦 Using Standard CamoXpert Architecture")
         model = CamoXpert(3, 1, pretrained=True, backbone=args.backbone, num_experts=args.num_experts).cuda()
 
-    # Multi-GPU support - DISABLED due to DataParallel incompatibility with Tesla T4
-    # Use single GPU for stability
+    # Multi-GPU support with DDP (recommended) or single GPU
     n_gpus = torch.cuda.device_count()
-    print(f"Available GPUs: {n_gpus}")
-    print(f"Using single GPU: {torch.cuda.get_device_name(0)}")
-    print(f"(DataParallel disabled for stability)\n")
+    is_main_process = True
 
-    # Automatic batch size adjustment for single GPU
-    if args.batch_size > 32:
-        original_batch = args.batch_size
-        args.batch_size = 24  # Safe for Tesla T4
-        # Increase gradient accumulation to maintain effective batch size
-        args.accumulation_steps = max(args.accumulation_steps, (original_batch + 23) // 24)
-        print(f"⚠️  Adjusted for single GPU:")
-        print(f"   Batch size: {original_batch} → {args.batch_size}")
-        print(f"   Gradient accumulation: {args.accumulation_steps} steps")
-        print(f"   Effective batch: {args.batch_size * args.accumulation_steps}\n")
+    if args.use_ddp and n_gpus > 1:
+        print(f"🚀 Using DistributedDataParallel with {n_gpus} GPUs!")
+        is_main_process = setup_ddp(args)
+        if is_main_process:
+            for i in range(n_gpus):
+                print(f"   GPU {i}: {torch.cuda.get_device_name(i)}")
+        model = DDP(model, device_ids=[args.local_rank], output_device=args.local_rank,
+                   find_unused_parameters=False)
+        if is_main_process:
+            print(f"   Batch per GPU: {args.batch_size}")
+            print(f"   Total batch: {args.batch_size * n_gpus}\n")
+    else:
+        if n_gpus > 1:
+            print(f"⚠️  Multiple GPUs detected but DDP not enabled.")
+            print(f"   Use --use-ddp flag to enable multi-GPU training")
+            print(f"   Using single GPU: {torch.cuda.get_device_name(0)}\n")
+        else:
+            print(f"Using single GPU: {torch.cuda.get_device_name(0)}\n")
 
-    # model = nn.DataParallel(model)  # Disabled
+        # Automatic batch size adjustment for single GPU
+        if args.batch_size > 32:
+            original_batch = args.batch_size
+            args.batch_size = 24  # Safe for Tesla T4
+            # Increase gradient accumulation to maintain effective batch size
+            args.accumulation_steps = max(args.accumulation_steps, (original_batch + 23) // 24)
+            if is_main_process:
+                print(f"⚠️  Adjusted for single GPU:")
+                print(f"   Batch size: {original_batch} → {args.batch_size}")
+                print(f"   Gradient accumulation: {args.accumulation_steps} steps")
+                print(f"   Effective batch: {args.batch_size * args.accumulation_steps}\n")
 
     if args.gradient_checkpointing:
         model = enable_gradient_checkpointing(model)
