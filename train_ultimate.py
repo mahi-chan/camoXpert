@@ -410,16 +410,25 @@ def train(args):
         print("📦 Using Standard CamoXpert Architecture")
         model = CamoXpert(3, 1, pretrained=True, backbone=args.backbone, num_experts=args.num_experts).cuda()
 
-    # Multi-GPU support
+    # Multi-GPU support - DISABLED due to DataParallel incompatibility with Tesla T4
+    # Use single GPU for stability
     n_gpus = torch.cuda.device_count()
-    if n_gpus > 1:
-        print(f"🚀 Using {n_gpus} GPUs for training!")
-        for i in range(n_gpus):
-            print(f"   GPU {i}: {torch.cuda.get_device_name(i)}")
-        model = nn.DataParallel(model)
-        print(f"   Effective batch per GPU: {args.batch_size // n_gpus}\n")
-    else:
-        print(f"Using single GPU: {torch.cuda.get_device_name(0)}\n")
+    print(f"Available GPUs: {n_gpus}")
+    print(f"Using single GPU: {torch.cuda.get_device_name(0)}")
+    print(f"(DataParallel disabled for stability)\n")
+
+    # Automatic batch size adjustment for single GPU
+    if args.batch_size > 32:
+        original_batch = args.batch_size
+        args.batch_size = 24  # Safe for Tesla T4
+        # Increase gradient accumulation to maintain effective batch size
+        args.accumulation_steps = max(args.accumulation_steps, (original_batch + 23) // 24)
+        print(f"⚠️  Adjusted for single GPU:")
+        print(f"   Batch size: {original_batch} → {args.batch_size}")
+        print(f"   Gradient accumulation: {args.accumulation_steps} steps")
+        print(f"   Effective batch: {args.batch_size * args.accumulation_steps}\n")
+
+    # model = nn.DataParallel(model)  # Disabled
 
     if args.gradient_checkpointing:
         model = enable_gradient_checkpointing(model)
