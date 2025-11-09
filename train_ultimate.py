@@ -522,14 +522,16 @@ def train(args):
 
     if args.use_cod_specialized:
         print("Using COD-Specialized Loss Function")
-        criterion = CODSpecializedLoss(bce_weight=5.0, iou_weight=3.0, edge_weight=2.0,
-                                      boundary_weight=3.0, uncertainty_weight=0.5,
-                                      reverse_attention_weight=1.0, aux_weight=0.1)
+        # Reduced loss weights for AMP stability (prevent FP16 overflow)
+        criterion = CODSpecializedLoss(bce_weight=2.0, iou_weight=1.5, edge_weight=1.0,
+                                      boundary_weight=1.5, uncertainty_weight=0.3,
+                                      reverse_attention_weight=0.8, aux_weight=0.1)
     else:
-        criterion = AdvancedCODLoss(bce_weight=5.0, iou_weight=3.0, edge_weight=2.0, aux_weight=0.1)
+        # Reduced loss weights for AMP stability
+        criterion = AdvancedCODLoss(bce_weight=2.0, iou_weight=1.5, edge_weight=1.0, aux_weight=0.1)
     metrics = CODMetrics()
-    # More conservative GradScaler to prevent FP16 overflow
-    scaler = torch.cuda.amp.GradScaler(init_scale=2048, growth_interval=1000)
+    # Very conservative GradScaler for initial stability (will grow automatically)
+    scaler = torch.cuda.amp.GradScaler(init_scale=512, growth_interval=2000)
     ema = EMA(model, decay=args.ema_decay) if args.use_ema else None
     if args.use_ema:
         print(f"✨ EMA enabled with decay: {args.ema_decay}")
