@@ -423,14 +423,23 @@ def train(args):
 
     os.makedirs(args.checkpoint_dir, exist_ok=True)
 
+    # Initialize DDP FIRST if enabled
+    n_gpus = torch.cuda.device_count()
+    is_main_process = True
+
+    if args.use_ddp and n_gpus > 1:
+        if is_main_process:
+            print(f"🚀 Initializing DistributedDataParallel with {n_gpus} GPUs!\n")
+        is_main_process = setup_ddp(args)
+
     # Datasets
     train_data = COD10KDataset(args.dataset_path, 'train', args.img_size, augment=True)
     val_data = COD10KDataset(args.dataset_path, 'val', args.img_size, augment=False)
 
-    # Create samplers for DDP if enabled
+    # Create samplers for DDP if enabled (AFTER setup_ddp())
     train_sampler = None
     val_sampler = None
-    if args.use_ddp and torch.cuda.device_count() > 1:
+    if args.use_ddp and n_gpus > 1:
         train_sampler = DistributedSampler(train_data, shuffle=True)
         val_sampler = DistributedSampler(val_data, shuffle=False)
 
@@ -449,23 +458,21 @@ def train(args):
                             prefetch_factor=2,
                             multiprocessing_context='fork' if args.num_workers > 0 else None)
 
-    print(f"Train: {len(train_data)} | Val: {len(val_data)}\n")
+    if is_main_process:
+        print(f"Train: {len(train_data)} | Val: {len(val_data)}\n")
 
     # Model
     if args.use_cod_specialized:
-        print("🎯 Using 100% COD-Specialized Architecture")
+        if is_main_process:
+            print("🎯 Using 100% COD-Specialized Architecture")
         model = CamoXpertCOD(3, 1, pretrained=True, backbone=args.backbone).cuda()
     else:
-        print("📦 Using Standard CamoXpert Architecture")
+        if is_main_process:
+            print("📦 Using Standard CamoXpert Architecture")
         model = CamoXpert(3, 1, pretrained=True, backbone=args.backbone, num_experts=args.num_experts).cuda()
 
-    # Multi-GPU support with DDP (recommended) or single GPU
-    n_gpus = torch.cuda.device_count()
-    is_main_process = True
-
+    # Wrap model with DDP if enabled
     if args.use_ddp and n_gpus > 1:
-        print(f"🚀 Using DistributedDataParallel with {n_gpus} GPUs!")
-        is_main_process = setup_ddp(args)
         if is_main_process:
             for i in range(n_gpus):
                 print(f"   GPU {i}: {torch.cuda.get_device_name(i)}")
