@@ -381,15 +381,15 @@ def train_epoch(model, loader, criterion, optimizer, scaler, accumulation_steps,
 
 
 @torch.no_grad()
-def validate(model, loader, metrics):
+def validate(model, loader, metrics, use_ddp=False):
     """
-    Validation function
+    Validation function with DDP support
 
-    Note: Uses unwrapped model (single GPU) to avoid DataParallel edge cases
-    with odd batch sizes that don't divide evenly across GPUs.
+    Computes metrics on local data, then synchronizes across all GPUs
+    to get global average over the full validation set.
     """
-    # Unwrap DataParallel for validation (avoids misalignment errors)
-    actual_model = model.module if isinstance(model, nn.DataParallel) else model
+    # Unwrap DataParallel/DDP for validation
+    actual_model = get_actual_model(model)
     actual_model.eval()
 
     all_metrics = []
@@ -398,7 +398,26 @@ def validate(model, loader, metrics):
         pred, _, _ = actual_model(images)
         pred = torch.sigmoid(pred)
         all_metrics.append(metrics.compute_all(pred, masks))
-    return {k: np.mean([m[k] for m in all_metrics]) for k in all_metrics[0]}
+
+    # Compute local metrics (for this GPU's subset)
+    local_metrics = {k: np.mean([m[k] for m in all_metrics]) for k in all_metrics[0]}
+
+    # Synchronize metrics across all GPUs if using DDP
+    if use_ddp and dist.is_initialized():
+        # Convert to tensors for all_reduce
+        metric_tensor = torch.tensor(
+            [local_metrics['IoU'], local_metrics['Dice_Score']],
+            device='cuda'
+        )
+
+        # Average across all GPUs
+        dist.all_reduce(metric_tensor, op=dist.ReduceOp.AVG)
+
+        # Update with synchronized values
+        local_metrics['IoU'] = metric_tensor[0].item()
+        local_metrics['Dice_Score'] = metric_tensor[1].item()
+
+    return local_metrics
 
 
 def train(args):
@@ -619,7 +638,7 @@ def train(args):
 
             if ema:
                 ema.apply_shadow()
-            val_metrics = validate(model, val_loader, metrics)
+            val_metrics = validate(model, val_loader, metrics, use_ddp=args.use_ddp)
             if ema:
                 ema.restore()
 
@@ -629,14 +648,15 @@ def train(args):
                 best_iou = val_metrics['IoU']
                 # Save unwrapped model state dict (portable between single/multi-GPU)
                 actual_model = get_actual_model(model)
-                torch.save({
-                    'epoch': epoch,
-                    'model_state_dict': actual_model.state_dict(),
-                    'ema_state_dict': ema.shadow if ema else None,
-                    'best_iou': best_iou,
-                    'args': vars(args)
-                }, f"{args.checkpoint_dir}/best_model.pth")
-                print(f"🏆 NEW BEST! IoU: {best_iou:.4f}")
+                if is_main_process:
+                    torch.save({
+                        'epoch': epoch,
+                        'model_state_dict': actual_model.state_dict(),
+                        'ema_state_dict': ema.shadow if ema else None,
+                        'best_iou': best_iou,
+                        'args': vars(args)
+                    }, f"{args.checkpoint_dir}/best_model.pth")
+                    print(f"🏆 NEW BEST! IoU: {best_iou:.4f}")
 
             history.append({'epoch': epoch, 'stage': 1, 'train_loss': train_loss, **val_metrics})
 
@@ -768,7 +788,7 @@ def train(args):
 
         if ema:
             ema.apply_shadow()
-        val_metrics = validate(model, val_loader, metrics)
+        val_metrics = validate(model, val_loader, metrics, use_ddp=args.use_ddp)
         if ema:
             ema.restore()
 
@@ -781,14 +801,15 @@ def train(args):
             best_iou = val_metrics['IoU']
             # Save unwrapped model state dict (portable between single/multi-GPU)
             actual_model = get_actual_model(model)
-            torch.save({
-                'epoch': epoch,
-                'model_state_dict': actual_model.state_dict(),
-                'ema_state_dict': ema.shadow if ema else None,
-                'best_iou': best_iou,
-                'args': vars(args)
-            }, f"{args.checkpoint_dir}/best_model.pth")
-            print(f"🏆 NEW BEST! IoU: {best_iou:.4f}")
+            if is_main_process:
+                torch.save({
+                    'epoch': epoch,
+                    'model_state_dict': actual_model.state_dict(),
+                    'ema_state_dict': ema.shadow if ema else None,
+                    'best_iou': best_iou,
+                    'args': vars(args)
+                }, f"{args.checkpoint_dir}/best_model.pth")
+                print(f"🏆 NEW BEST! IoU: {best_iou:.4f}")
 
         history.append({'epoch': epoch, 'stage': 2, 'train_loss': train_loss, **val_metrics})
 
