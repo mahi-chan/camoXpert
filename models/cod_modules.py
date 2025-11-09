@@ -40,9 +40,9 @@ class BoundaryUncertaintyModule(nn.Module):
         )
 
     def forward(self, x):
-        shared_feat = self.shared(x).clone()
-        mean = self.mean_head(shared_feat).clone()
-        uncertainty = self.uncertainty_head(shared_feat).clone()
+        shared_feat = self.shared(x)
+        mean = self.mean_head(shared_feat)
+        uncertainty = self.uncertainty_head(shared_feat)
         return mean, uncertainty
 
 
@@ -78,10 +78,9 @@ class SearchIdentificationModule(nn.Module):
         )
 
     def forward(self, x):
-        search_map = self.search_conv(x).clone()  # Where are objects likely?
-        features = self.identify_conv(x).clone()  # What do they look like?
-        # Focus identification on high-search areas
-        searched_features = (features * search_map).clone()
+        search_map = self.search_conv(x)
+        features = self.identify_conv(x)
+        searched_features = features * search_map
         return searched_features, search_map
 
 
@@ -115,19 +114,11 @@ class ReverseAttentionModule(nn.Module):
         )
 
     def forward(self, x):
-        # Predict background probability
-        bg_map = self.background_pred(x).clone()
-
-        # Foreground = not background
-        fg_map = (1 - bg_map).clone()
-
-        # Concatenate features with background map - clone x for alignment
-        x_with_bg = torch.cat([x.clone(), bg_map], dim=1)
+        bg_map = self.background_pred(x)
+        fg_map = 1 - bg_map
+        x_with_bg = torch.cat([x, bg_map], dim=1)
         refined = self.refine(x_with_bg)
-
-        # Apply foreground attention
         output = refined * fg_map
-
         return output, fg_map
 
 
@@ -173,18 +164,12 @@ class ContrastEnhancementModule(nn.Module):
         )
 
     def forward(self, x):
-        # Detect contrast at multiple scales - clone outputs for alignment
-        c3 = self.contrast_3x3(x).clone()
-        c5 = self.contrast_5x5(x).clone()
-        c7 = self.contrast_7x7(x).clone()
-
-        # Fuse multi-scale contrasts
+        c3 = self.contrast_3x3(x)
+        c5 = self.contrast_5x5(x)
+        c7 = self.contrast_7x7(x)
         contrast = self.fusion(torch.cat([c3, c5, c7], dim=1))
-
-        # Amplify contrast (channel-wise attention)
         contrast_weight = self.amplify(contrast)
         enhanced = x + contrast * contrast_weight
-
         return enhanced
 
 
@@ -227,21 +212,11 @@ class IterativeBoundaryRefinement(nn.Module):
         refinements = []
 
         for i in range(self.num_iterations):
-            # Normalize uncertainty for attention - clone for alignment
-            uncertainty_norm = (uncertainty / (uncertainty.max() + 1e-8)).clone()
-
-            # Concatenate features, prediction, and uncertainty - clone inputs
-            x = torch.cat([features.clone(), pred.clone(), uncertainty_norm], dim=1)
-
-            # Refine features
+            uncertainty_norm = uncertainty / (uncertainty.max() + 1e-8)
+            x = torch.cat([features, pred, uncertainty_norm], dim=1)
             refined_features = self.refinement_blocks[i](x)
-
-            # Apply attention (focus on boundaries = high uncertainty)
             refined_features = refined_features * (1 + uncertainty_norm)
-
-            # New prediction
             pred = self.pred_heads[i](refined_features)
-
             refinements.append(pred)
 
         return refinements
@@ -286,11 +261,10 @@ class CODTextureExpert(nn.Module):
         )
 
     def forward(self, x):
-        # Clone all branch outputs to ensure proper alignment for DataParallel
-        feat1 = self.branch1(x).clone()
-        feat2 = self.branch2(x).clone()
-        feat3 = self.branch3(x).clone()
-        feat4 = self.branch4(x).clone()
+        feat1 = self.branch1(x)
+        feat2 = self.branch2(x)
+        feat3 = self.branch3(x)
+        feat4 = self.branch4(x)
         multi_scale = torch.cat([feat1, feat2, feat3, feat4], dim=1)
         return self.fusion(multi_scale) + x
 
@@ -329,21 +303,15 @@ class CODFrequencyExpert(nn.Module):
         )
 
     def forward(self, x):
-        # Frequency separation via averaging - clone pooling outputs for alignment
-        low_freq = F.avg_pool2d(x, kernel_size=3, stride=1, padding=1).clone()
-        high_freq = (x - low_freq).clone()
-
-        # Mid frequency = difference of Gaussians
-        mid_freq_blur1 = F.avg_pool2d(x, kernel_size=3, stride=1, padding=1).clone()
-        mid_freq_blur2 = F.avg_pool2d(x, kernel_size=5, stride=1, padding=2).clone()
-        mid_freq = (mid_freq_blur1 - mid_freq_blur2).clone()
-
-        # Clone all conv outputs to ensure proper alignment for DataParallel
-        low_feat = self.low_freq_conv(low_freq).clone()
-        mid_feat = self.mid_freq_conv(mid_freq).clone()
-        high_feat = self.high_freq_conv(high_freq).clone()
-        spatial_feat = self.spatial_conv(x).clone()
-
+        low_freq = F.avg_pool2d(x, kernel_size=3, stride=1, padding=1)
+        high_freq = x - low_freq
+        mid_freq_blur1 = F.avg_pool2d(x, kernel_size=3, stride=1, padding=1)
+        mid_freq_blur2 = F.avg_pool2d(x, kernel_size=5, stride=1, padding=2)
+        mid_freq = mid_freq_blur1 - mid_freq_blur2
+        low_feat = self.low_freq_conv(low_freq)
+        mid_feat = self.mid_freq_conv(mid_freq)
+        high_feat = self.high_freq_conv(high_freq)
+        spatial_feat = self.spatial_conv(x)
         freq_features = torch.cat([low_feat, mid_feat, high_feat, spatial_feat], dim=1)
         return self.fusion(freq_features) + x
 
@@ -385,11 +353,9 @@ class CODEdgeExpert(nn.Module):
         )
 
     def forward(self, x):
-        # Learnable edge detection - DataParallel safe
-        h_edge = self.horizontal_edge(x).clone()
-        v_edge = self.vertical_edge(x).clone()
-        lap_edge = self.laplacian_edge(x).clone()
-        spatial = self.spatial_branch(x).clone()
-
+        h_edge = self.horizontal_edge(x)
+        v_edge = self.vertical_edge(x)
+        lap_edge = self.laplacian_edge(x)
+        spatial = self.spatial_branch(x)
         edge_features = torch.cat([h_edge, v_edge, lap_edge, spatial], dim=1)
         return self.fusion(edge_features) + x
