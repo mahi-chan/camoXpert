@@ -180,8 +180,10 @@ def enable_gradient_checkpointing(model):
 
 
 def get_actual_model(model):
-    """Get the actual model, unwrapping DataParallel if needed"""
-    return model.module if isinstance(model, nn.DataParallel) else model
+    """Get the actual model, unwrapping DataParallel or DistributedDataParallel if needed"""
+    if isinstance(model, (nn.DataParallel, DDP)):
+        return model.module
+    return model
 
 
 def progressive_unfreeze_backbone(model, stage):
@@ -788,8 +790,18 @@ def train(args):
     print(f"Status:   {'✅ SOTA!' if best_iou >= 0.72 else f'Gap: {0.72 - best_iou:.4f}'}")
     print("=" * 70)
 
+    # Cleanup DDP if used
+    if args.use_ddp:
+        cleanup_ddp()
+
 
 if __name__ == '__main__':
     args = parse_args()
     if args.command == 'train':
-        train(args)
+        try:
+            train(args)
+        except Exception as e:
+            # Ensure DDP cleanup even on error
+            if hasattr(args, 'use_ddp') and args.use_ddp:
+                cleanup_ddp()
+            raise e
