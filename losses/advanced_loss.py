@@ -217,8 +217,18 @@ class CODSpecializedLoss(nn.Module):
     def reverse_attention_loss(self, fg_map, target):
         """
         Reverse attention loss: Foreground map should match target
+        fg_map is already in [0, 1] range (from sigmoid), so we need to
+        disable autocast for numerical stability with AMP
         """
-        return F.binary_cross_entropy(fg_map, target)
+        # Clamp to valid probability range and add epsilon for numerical stability
+        fg_map = torch.clamp(fg_map, min=1e-7, max=1.0 - 1e-7)
+
+        # Disable autocast for this operation (AMP-safe workaround)
+        with torch.cuda.amp.autocast(enabled=False):
+            # Convert to fp32 for stable BCE computation
+            fg_map = fg_map.float()
+            target = target.float()
+            return F.binary_cross_entropy(fg_map, target)
 
     def forward(self, pred, target, aux_loss=None, deep_outputs=None,
                 uncertainty=None, fg_map=None, refinements=None, search_map=None):
@@ -269,7 +279,15 @@ class CODSpecializedLoss(nn.Module):
 
         # Search map loss (search map should highlight object regions)
         if search_map is not None:
-            search_loss = F.binary_cross_entropy(search_map, target)
+            # Clamp to valid probability range (search_map is already sigmoid'd)
+            search_map_clamped = torch.clamp(search_map, min=1e-7, max=1.0 - 1e-7)
+
+            # Disable autocast for AMP compatibility
+            with torch.cuda.amp.autocast(enabled=False):
+                search_map_clamped = search_map_clamped.float()
+                target_float = target.float()
+                search_loss = F.binary_cross_entropy(search_map_clamped, target_float)
+
             total_loss += 0.5 * search_loss
             loss_dict['search'] = search_loss.item()
 

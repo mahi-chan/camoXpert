@@ -6,7 +6,10 @@ import os
 import sys
 import torch
 import torch.nn as nn
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data import DataLoader
+from torch.utils.data.distributed import DistributedSampler
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import OneCycleLR, CosineAnnealingLR, CosineAnnealingWarmRestarts
 import json
@@ -70,6 +73,12 @@ def parse_args():
     parser.add_argument('--use-cod-specialized', action='store_true', default=False,
                         help='Use 100%% COD-specialized architecture (recommended for best results)')
 
+    # DDP arguments
+    parser.add_argument('--use-ddp', action='store_true', default=False,
+                        help='Use DistributedDataParallel for multi-GPU training (recommended over DataParallel)')
+    parser.add_argument('--local_rank', type=int, default=-1,
+                        help='Local rank for distributed training (auto-set by torch.distributed.launch)')
+
     return parser.parse_args()
 
 
@@ -98,6 +107,35 @@ class EMA:
         for name, param in self.model.named_parameters():
             if param.requires_grad:
                 param.data = self.backup[name]
+
+
+def setup_ddp(args):
+    """Initialize DistributedDataParallel"""
+    if 'RANK' in os.environ and 'WORLD_SIZE' in os.environ:
+        args.rank = int(os.environ["RANK"])
+        args.world_size = int(os.environ["WORLD_SIZE"])
+        args.local_rank = int(os.environ["LOCAL_RANK"])
+    elif 'SLURM_PROCID' in os.environ:
+        args.rank = int(os.environ['SLURM_PROCID'])
+        args.local_rank = args.rank % torch.cuda.device_count()
+    elif hasattr(args, 'rank'):
+        pass
+    else:
+        args.rank = 0
+        args.world_size = 1
+        args.local_rank = 0
+
+    torch.cuda.set_device(args.local_rank)
+    dist.init_process_group(backend='nccl', init_method='env://',
+                           world_size=args.world_size, rank=args.rank)
+    dist.barrier()
+    return args.rank == 0  # is_main_process
+
+
+def cleanup_ddp():
+    """Cleanup DDP"""
+    if dist.is_initialized():
+        dist.destroy_process_group()
 
 
 def clear_gpu_memory():
@@ -130,20 +168,32 @@ def enable_gradient_checkpointing(model):
 
         return checkpointed_forward
 
+    # Checkpoint memory-intensive modules
+    # For COD: expert modules, decoder blocks, refinement modules, contrast enhancement
+    checkpoint_patterns = ['expert', 'decoder', 'refinement', 'contrast', 'moe', 'sdta']
+
     for name, module in model.named_modules():
-        if 'moe' in name.lower() or 'sdta' in name.lower():
-            if hasattr(module, 'forward'):
-                original_forward = module.forward
-                module.forward = make_checkpointed_forward(original_forward).__get__(module, type(module))
-                checkpointed += 1
+        # Check if module name contains any checkpoint pattern
+        should_checkpoint = any(pattern in name.lower() for pattern in checkpoint_patterns)
+
+        if should_checkpoint and hasattr(module, 'forward'):
+            # Skip if it's a container module (Sequential, ModuleList, etc.)
+            if isinstance(module, (nn.Sequential, nn.ModuleList, nn.ModuleDict)):
+                continue
+
+            original_forward = module.forward
+            module.forward = make_checkpointed_forward(original_forward).__get__(module, type(module))
+            checkpointed += 1
 
     print(f"✓ Checkpointed {checkpointed} modules")
     return model
 
 
 def get_actual_model(model):
-    """Get the actual model, unwrapping DataParallel if needed"""
-    return model.module if isinstance(model, nn.DataParallel) else model
+    """Get the actual model, unwrapping DataParallel or DistributedDataParallel if needed"""
+    if isinstance(model, (nn.DataParallel, DDP)):
+        return model.module
+    return model
 
 
 def progressive_unfreeze_backbone(model, stage):
@@ -331,15 +381,15 @@ def train_epoch(model, loader, criterion, optimizer, scaler, accumulation_steps,
 
 
 @torch.no_grad()
-def validate(model, loader, metrics):
+def validate(model, loader, metrics, use_ddp=False):
     """
-    Validation function
+    Validation function with DDP support
 
-    Note: Uses unwrapped model (single GPU) to avoid DataParallel edge cases
-    with odd batch sizes that don't divide evenly across GPUs.
+    Computes metrics on local data, then synchronizes across all GPUs
+    to get global average over the full validation set.
     """
-    # Unwrap DataParallel for validation (avoids misalignment errors)
-    actual_model = model.module if isinstance(model, nn.DataParallel) else model
+    # Unwrap DataParallel/DDP for validation
+    actual_model = get_actual_model(model)
     actual_model.eval()
 
     all_metrics = []
@@ -348,7 +398,26 @@ def validate(model, loader, metrics):
         pred, _, _ = actual_model(images)
         pred = torch.sigmoid(pred)
         all_metrics.append(metrics.compute_all(pred, masks))
-    return {k: np.mean([m[k] for m in all_metrics]) for k in all_metrics[0]}
+
+    # Compute local metrics (for this GPU's subset)
+    local_metrics = {k: np.mean([m[k] for m in all_metrics]) for k in all_metrics[0]}
+
+    # Synchronize metrics across all GPUs if using DDP
+    if use_ddp and dist.is_initialized():
+        # Convert to tensors for all_reduce
+        metric_tensor = torch.tensor(
+            [local_metrics['IoU'], local_metrics['Dice_Score']],
+            device='cuda'
+        )
+
+        # Average across all GPUs
+        dist.all_reduce(metric_tensor, op=dist.ReduceOp.AVG)
+
+        # Update with synchronized values
+        local_metrics['IoU'] = metric_tensor[0].item()
+        local_metrics['Dice_Score'] = metric_tensor[1].item()
+
+    return local_metrics
 
 
 def train(args):
@@ -385,41 +454,84 @@ def train(args):
 
     os.makedirs(args.checkpoint_dir, exist_ok=True)
 
+    # Initialize DDP FIRST if enabled
+    n_gpus = torch.cuda.device_count()
+    is_main_process = True
+
+    if args.use_ddp and n_gpus > 1:
+        if is_main_process:
+            print(f"🚀 Initializing DistributedDataParallel with {n_gpus} GPUs!\n")
+        is_main_process = setup_ddp(args)
+
     # Datasets
     train_data = COD10KDataset(args.dataset_path, 'train', args.img_size, augment=True)
     val_data = COD10KDataset(args.dataset_path, 'val', args.img_size, augment=False)
 
-    train_loader = DataLoader(train_data, args.batch_size, shuffle=True,
+    # Create samplers for DDP if enabled (AFTER setup_ddp())
+    train_sampler = None
+    val_sampler = None
+    if args.use_ddp and n_gpus > 1:
+        train_sampler = DistributedSampler(train_data, shuffle=True)
+        val_sampler = DistributedSampler(val_data, shuffle=False)
+
+    train_loader = DataLoader(train_data, args.batch_size,
+                              shuffle=(train_sampler is None),  # Don't shuffle if using sampler
+                              sampler=train_sampler,
                               num_workers=args.num_workers, pin_memory=True, drop_last=True,
                               persistent_workers=True if args.num_workers > 0 else False,
                               prefetch_factor=3,
                               multiprocessing_context='fork' if args.num_workers > 0 else None)
-    val_loader = DataLoader(val_data, args.batch_size, shuffle=False,
+    val_loader = DataLoader(val_data, args.batch_size,
+                            shuffle=False,
+                            sampler=val_sampler,
                             num_workers=args.num_workers, pin_memory=True,
                             persistent_workers=True if args.num_workers > 0 else False,
                             prefetch_factor=2,
                             multiprocessing_context='fork' if args.num_workers > 0 else None)
 
-    print(f"Train: {len(train_data)} | Val: {len(val_data)}\n")
+    if is_main_process:
+        print(f"Train: {len(train_data)} | Val: {len(val_data)}\n")
 
     # Model
     if args.use_cod_specialized:
-        print("🎯 Using 100% COD-Specialized Architecture")
+        if is_main_process:
+            print("🎯 Using 100% COD-Specialized Architecture")
         model = CamoXpertCOD(3, 1, pretrained=True, backbone=args.backbone).cuda()
     else:
-        print("📦 Using Standard CamoXpert Architecture")
+        if is_main_process:
+            print("📦 Using Standard CamoXpert Architecture")
         model = CamoXpert(3, 1, pretrained=True, backbone=args.backbone, num_experts=args.num_experts).cuda()
 
-    # Multi-GPU support
-    n_gpus = torch.cuda.device_count()
-    if n_gpus > 1:
-        print(f"🚀 Using {n_gpus} GPUs for training!")
-        for i in range(n_gpus):
-            print(f"   GPU {i}: {torch.cuda.get_device_name(i)}")
-        model = nn.DataParallel(model)
-        print(f"   Effective batch per GPU: {args.batch_size // n_gpus}\n")
+    # Wrap model with DDP if enabled
+    if args.use_ddp and n_gpus > 1:
+        if is_main_process:
+            for i in range(n_gpus):
+                print(f"   GPU {i}: {torch.cuda.get_device_name(i)}")
+        # Enable find_unused_parameters for staged training (backbone frozen in stage 1)
+        model = DDP(model, device_ids=[args.local_rank], output_device=args.local_rank,
+                   find_unused_parameters=True)
+        if is_main_process:
+            print(f"   Batch per GPU: {args.batch_size}")
+            print(f"   Total batch: {args.batch_size * n_gpus}\n")
     else:
-        print(f"Using single GPU: {torch.cuda.get_device_name(0)}\n")
+        if n_gpus > 1:
+            print(f"⚠️  Multiple GPUs detected but DDP not enabled.")
+            print(f"   Use --use-ddp flag to enable multi-GPU training")
+            print(f"   Using single GPU: {torch.cuda.get_device_name(0)}\n")
+        else:
+            print(f"Using single GPU: {torch.cuda.get_device_name(0)}\n")
+
+        # Automatic batch size adjustment for single GPU
+        if args.batch_size > 32:
+            original_batch = args.batch_size
+            args.batch_size = 24  # Safe for Tesla T4
+            # Increase gradient accumulation to maintain effective batch size
+            args.accumulation_steps = max(args.accumulation_steps, (original_batch + 23) // 24)
+            if is_main_process:
+                print(f"⚠️  Adjusted for single GPU:")
+                print(f"   Batch size: {original_batch} → {args.batch_size}")
+                print(f"   Gradient accumulation: {args.accumulation_steps} steps")
+                print(f"   Effective batch: {args.batch_size * args.accumulation_steps}\n")
 
     if args.gradient_checkpointing:
         model = enable_gradient_checkpointing(model)
@@ -429,14 +541,16 @@ def train(args):
 
     if args.use_cod_specialized:
         print("Using COD-Specialized Loss Function")
-        criterion = CODSpecializedLoss(bce_weight=5.0, iou_weight=3.0, edge_weight=2.0,
-                                      boundary_weight=3.0, uncertainty_weight=0.5,
-                                      reverse_attention_weight=1.0, aux_weight=0.1)
+        # Reduced loss weights for AMP stability (prevent FP16 overflow)
+        criterion = CODSpecializedLoss(bce_weight=2.0, iou_weight=1.5, edge_weight=1.0,
+                                      boundary_weight=1.5, uncertainty_weight=0.3,
+                                      reverse_attention_weight=0.8, aux_weight=0.1)
     else:
-        criterion = AdvancedCODLoss(bce_weight=5.0, iou_weight=3.0, edge_weight=2.0, aux_weight=0.1)
+        # Reduced loss weights for AMP stability
+        criterion = AdvancedCODLoss(bce_weight=2.0, iou_weight=1.5, edge_weight=1.0, aux_weight=0.1)
     metrics = CODMetrics()
-    # More conservative GradScaler to prevent FP16 overflow
-    scaler = torch.cuda.amp.GradScaler(init_scale=2048, growth_interval=1000)
+    # Very conservative GradScaler for initial stability (will grow automatically)
+    scaler = torch.cuda.amp.GradScaler(init_scale=512, growth_interval=2000)
     ema = EMA(model, decay=args.ema_decay) if args.use_ema else None
     if args.use_ema:
         print(f"✨ EMA enabled with decay: {args.ema_decay}")
@@ -524,7 +638,7 @@ def train(args):
 
             if ema:
                 ema.apply_shadow()
-            val_metrics = validate(model, val_loader, metrics)
+            val_metrics = validate(model, val_loader, metrics, use_ddp=args.use_ddp)
             if ema:
                 ema.restore()
 
@@ -534,14 +648,15 @@ def train(args):
                 best_iou = val_metrics['IoU']
                 # Save unwrapped model state dict (portable between single/multi-GPU)
                 actual_model = get_actual_model(model)
-                torch.save({
-                    'epoch': epoch,
-                    'model_state_dict': actual_model.state_dict(),
-                    'ema_state_dict': ema.shadow if ema else None,
-                    'best_iou': best_iou,
-                    'args': vars(args)
-                }, f"{args.checkpoint_dir}/best_model.pth")
-                print(f"🏆 NEW BEST! IoU: {best_iou:.4f}")
+                if is_main_process:
+                    torch.save({
+                        'epoch': epoch,
+                        'model_state_dict': actual_model.state_dict(),
+                        'ema_state_dict': ema.shadow if ema else None,
+                        'best_iou': best_iou,
+                        'args': vars(args)
+                    }, f"{args.checkpoint_dir}/best_model.pth")
+                    print(f"🏆 NEW BEST! IoU: {best_iou:.4f}")
 
             history.append({'epoch': epoch, 'stage': 1, 'train_loss': train_loss, **val_metrics})
 
@@ -673,7 +788,7 @@ def train(args):
 
         if ema:
             ema.apply_shadow()
-        val_metrics = validate(model, val_loader, metrics)
+        val_metrics = validate(model, val_loader, metrics, use_ddp=args.use_ddp)
         if ema:
             ema.restore()
 
@@ -686,14 +801,15 @@ def train(args):
             best_iou = val_metrics['IoU']
             # Save unwrapped model state dict (portable between single/multi-GPU)
             actual_model = get_actual_model(model)
-            torch.save({
-                'epoch': epoch,
-                'model_state_dict': actual_model.state_dict(),
-                'ema_state_dict': ema.shadow if ema else None,
-                'best_iou': best_iou,
-                'args': vars(args)
-            }, f"{args.checkpoint_dir}/best_model.pth")
-            print(f"🏆 NEW BEST! IoU: {best_iou:.4f}")
+            if is_main_process:
+                torch.save({
+                    'epoch': epoch,
+                    'model_state_dict': actual_model.state_dict(),
+                    'ema_state_dict': ema.shadow if ema else None,
+                    'best_iou': best_iou,
+                    'args': vars(args)
+                }, f"{args.checkpoint_dir}/best_model.pth")
+                print(f"🏆 NEW BEST! IoU: {best_iou:.4f}")
 
         history.append({'epoch': epoch, 'stage': 2, 'train_loss': train_loss, **val_metrics})
 
@@ -708,8 +824,18 @@ def train(args):
     print(f"Status:   {'✅ SOTA!' if best_iou >= 0.72 else f'Gap: {0.72 - best_iou:.4f}'}")
     print("=" * 70)
 
+    # Cleanup DDP if used
+    if args.use_ddp:
+        cleanup_ddp()
+
 
 if __name__ == '__main__':
     args = parse_args()
     if args.command == 'train':
-        train(args)
+        try:
+            train(args)
+        except Exception as e:
+            # Ensure DDP cleanup even on error
+            if hasattr(args, 'use_ddp') and args.use_ddp:
+                cleanup_ddp()
+            raise e
