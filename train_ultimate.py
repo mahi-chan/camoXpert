@@ -625,6 +625,13 @@ def train(args):
                                      min_lr=args.min_lr,
                                      t_mult=args.t_mult)
 
+        # Advance scheduler to correct position if resuming during Stage 1
+        if start_epoch > 0 and scheduler is not None and args.scheduler != 'onecycle':
+            if is_main_process:
+                print(f"   Advancing Stage 1 scheduler by {start_epoch} steps to sync with resumed epoch\n")
+            for _ in range(start_epoch):
+                scheduler.step()
+
         for epoch in range(start_epoch, args.stage1_epochs):
             train_loss = train_epoch(model, train_loader, criterion, optimizer, scaler,
                                      args.accumulation_steps, ema, epoch, args.stage1_epochs, args.deep_supervision,
@@ -752,7 +759,16 @@ def train(args):
 
     stage2_start = max(start_epoch, args.stage1_epochs)
     if stage2_start > args.stage1_epochs:
-        print(f"📍 Resuming Stage 2 from epoch {stage2_start}\n")
+        print(f"📍 Resuming Stage 2 from epoch {stage2_start}")
+        # Advance scheduler to correct position when resuming
+        if scheduler is not None and args.scheduler != 'onecycle':
+            steps_to_skip = stage2_start - args.stage1_epochs
+            if is_main_process:
+                print(f"   Advancing scheduler by {steps_to_skip} steps to sync with resumed epoch\n")
+            for _ in range(steps_to_skip):
+                scheduler.step()
+        else:
+            print()
 
     for epoch in range(stage2_start, args.epochs):
         # Progressive unfreezing: gradually unfreeze more layers
