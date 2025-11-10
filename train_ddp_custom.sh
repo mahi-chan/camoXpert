@@ -29,7 +29,7 @@ torchrun --nproc_per_node=2 --master_port=29500 train_ultimate.py train \
     --lr 0.0008 \
     --stage2-lr 0.00055 \
     --scheduler cosine \
-    --min-lr 0.001 \
+    --min-lr 0.0001 \
     --warmup-epochs 5 \
     --deep-supervision \
     --gradient-checkpointing \
