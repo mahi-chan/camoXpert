@@ -686,12 +686,24 @@ def train(args):
     # Create new dataloader with reduced batch size for Stage 2
     if args.stage2_batch_size != args.batch_size:
         print(f"🔧 Reducing batch size: {args.batch_size} → {args.stage2_batch_size}")
-        train_loader = DataLoader(train_data, args.stage2_batch_size, shuffle=True,
+        # Recreate samplers with Stage 2 batch size for DDP
+        if args.use_ddp and n_gpus > 1:
+            train_sampler = DistributedSampler(train_data, shuffle=True)
+            val_sampler = DistributedSampler(val_data, shuffle=False)
+        else:
+            train_sampler = None
+            val_sampler = None
+
+        train_loader = DataLoader(train_data, args.stage2_batch_size,
+                                  shuffle=(train_sampler is None),
+                                  sampler=train_sampler,
                                   num_workers=args.num_workers, pin_memory=True, drop_last=True,
                                   persistent_workers=True if args.num_workers > 0 else False,
                                   prefetch_factor=3,
                                   multiprocessing_context='fork' if args.num_workers > 0 else None)
-        val_loader = DataLoader(val_data, args.stage2_batch_size, shuffle=False,
+        val_loader = DataLoader(val_data, args.stage2_batch_size,
+                                shuffle=False,
+                                sampler=val_sampler,
                                 num_workers=args.num_workers, pin_memory=True,
                                 persistent_workers=True if args.num_workers > 0 else False,
                                 prefetch_factor=2,
