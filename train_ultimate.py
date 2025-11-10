@@ -741,11 +741,9 @@ def train(args):
             print(f"  Min LR: {args.min_lr}")
 
     # Create optimizer with unwrapped model (DataParallel compatible)
+    # In Stage 2, backbone is unfrozen - use same LR for all params to avoid scheduler conflicts
     actual_model = get_actual_model(model)
-    optimizer = AdamW([
-        {'params': actual_model.backbone.parameters(), 'lr': stage2_lr * 0.1},
-        {'params': [p for n, p in actual_model.named_parameters() if 'backbone' not in n], 'lr': stage2_lr}
-    ], weight_decay=args.weight_decay)
+    optimizer = AdamW(actual_model.parameters(), lr=stage2_lr, weight_decay=args.weight_decay)
 
     # Create scheduler for Stage 2
     total_steps = len(train_loader) * (args.epochs - args.stage1_epochs) // args.accumulation_steps
