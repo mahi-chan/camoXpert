@@ -645,6 +645,12 @@ def train(args):
                 scheduler.step()
 
         for epoch in range(start_epoch, args.stage1_epochs):
+            # Set epoch for DistributedSampler to ensure proper shuffling
+            if train_sampler is not None:
+                train_sampler.set_epoch(epoch)
+            if val_sampler is not None:
+                val_sampler.set_epoch(epoch)
+
             train_loss = train_epoch(model, train_loader, criterion, optimizer, scaler,
                                      args.accumulation_steps, ema, epoch, args.stage1_epochs, args.deep_supervision,
                                      use_amp=not args.no_amp)
@@ -792,6 +798,12 @@ def train(args):
             print()
 
     for epoch in range(stage2_start, args.epochs):
+        # Set epoch for DistributedSampler to ensure proper shuffling
+        if train_sampler is not None:
+            train_sampler.set_epoch(epoch)
+        if val_sampler is not None:
+            val_sampler.set_epoch(epoch)
+
         # Progressive unfreezing: gradually unfreeze more layers
         if args.progressive_unfreeze:
             stage2_progress = epoch - args.stage1_epochs
