@@ -54,7 +54,8 @@ class SparseRouter(nn.Module):
             )
 
         # Load balancing auxiliary loss coefficient
-        self.load_balance_loss_coef = 0.01
+        # Reduced to 0.001 to prevent gradient explosion
+        self.load_balance_loss_coef = 0.001
 
     def forward(self, x):
         """
