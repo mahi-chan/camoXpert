@@ -503,15 +503,27 @@ def train(args):
         model = CamoXpert(3, 1, pretrained=True, backbone=args.backbone, num_experts=args.num_experts).cuda()
 
     # Wrap model with DDP if enabled
+    # Determine if we need find_unused_parameters before wrapping with DDP
+    # Stage 1: backbone frozen → need find_unused_parameters=True
+    # Stage 2: all params active → find_unused_parameters=False (better performance)
+    # Check if we'll run Stage 1 or go straight to Stage 2
+    will_run_stage1 = True
+    if args.resume_from and os.path.exists(args.resume_from):
+        # Peek at checkpoint to see if we're past Stage 1
+        checkpoint = torch.load(args.resume_from, map_location='cpu', weights_only=False)
+        resume_epoch = checkpoint.get('epoch', -1) + 1
+        will_run_stage1 = resume_epoch < args.stage1_epochs
+
     if args.use_ddp and n_gpus > 1:
         if is_main_process:
             for i in range(n_gpus):
                 print(f"   GPU {i}: {torch.cuda.get_device_name(i)}")
-        # Enable find_unused_parameters ONLY for Stage 1 (backbone frozen)
-        # Set to False for Stage 2 to avoid DDP deadlocks and improve performance
-        # If training from scratch (Stage 1), set this to True
+        # Set find_unused_parameters based on which stage we'll run
+        use_find_unused = will_run_stage1
+        if is_main_process:
+            print(f"   DDP find_unused_parameters: {use_find_unused} ({'Stage 1' if will_run_stage1 else 'Stage 2'})")
         model = DDP(model, device_ids=[args.local_rank], output_device=args.local_rank,
-                   find_unused_parameters=False)
+                   find_unused_parameters=use_find_unused)
         if is_main_process:
             print(f"   Batch per GPU: {args.batch_size}")
             print(f"   Total batch: {args.batch_size * n_gpus}\n")
@@ -680,6 +692,17 @@ def train(args):
         # Only cleanup if we just finished Stage 1
         print("🧹 Cleaning up memory before Stage 2...")
         del optimizer, scheduler
+
+        # Recreate DDP wrapper with find_unused_parameters=False for Stage 2
+        if args.use_ddp and n_gpus > 1:
+            # Unwrap model from DDP
+            actual_model = model.module
+            # Recreate DDP with optimized settings for Stage 2 (no unused params)
+            model = DDP(actual_model, device_ids=[args.local_rank], output_device=args.local_rank,
+                       find_unused_parameters=False)
+            if is_main_process:
+                print("   ✓ Recreated DDP wrapper with find_unused_parameters=False")
+
         clear_gpu_memory()
         print_gpu_memory()
 
