@@ -21,6 +21,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from models.camoxpert import CamoXpert, count_parameters
 from models.camoxpert_cod import CamoXpertCOD
+from models.camoxpert_sparse_moe import CamoXpertSparseMoE
 from data.dataset import COD10KDataset
 from losses.advanced_loss import AdvancedCODLoss, CODSpecializedLoss
 from metrics.cod_metrics import CODMetrics
@@ -72,6 +73,14 @@ def parse_args():
                         help='Disable mixed precision (use FP32 instead of FP16) - more stable but slower')
     parser.add_argument('--use-cod-specialized', action='store_true', default=False,
                         help='Use 100%% COD-specialized architecture (recommended for best results)')
+
+    # Sparse MoE arguments
+    parser.add_argument('--use-sparse-moe', action='store_true', default=False,
+                        help='Use sparse MoE routing instead of dense experts (35-40%% faster)')
+    parser.add_argument('--moe-num-experts', type=int, default=6,
+                        help='Number of experts in MoE pool (default: 6)')
+    parser.add_argument('--moe-top-k', type=int, default=2,
+                        help='Number of experts to select per input (default: 2)')
 
     # DDP arguments
     parser.add_argument('--use-ddp', action='store_true', default=False,
@@ -302,10 +311,14 @@ def train_epoch(model, loader, criterion, optimizer, scaler, accumulation_steps,
                 fg_map = aux_or_dict.get('fg_map', None)
                 search_map = aux_or_dict.get('search_map', None)
                 refinements = aux_or_dict.get('refinements', None)
+                load_balance_loss = aux_or_dict.get('load_balance_loss', 0.0)
                 aux_loss = None
                 loss, _ = criterion(pred, masks, aux_loss, deep,
                                   uncertainty=uncertainty, fg_map=fg_map,
                                   refinements=refinements, search_map=search_map)
+                # Add load balance loss if using sparse MoE
+                if load_balance_loss != 0.0:
+                    loss = loss + load_balance_loss
             else:
                 # Standard model returns aux_loss
                 aux_loss = aux_or_dict
@@ -494,9 +507,18 @@ def train(args):
 
     # Model
     if args.use_cod_specialized:
-        if is_main_process:
-            print("🎯 Using 100% COD-Specialized Architecture")
-        model = CamoXpertCOD(3, 1, pretrained=True, backbone=args.backbone).cuda()
+        if args.use_sparse_moe:
+            if is_main_process:
+                print("🎯 Using 100% COD-Specialized Architecture with Sparse MoE Routing")
+                print(f"   MoE Experts: {args.moe_num_experts}")
+                print(f"   Top-k Selection: {args.moe_top_k}")
+                print(f"   Sparsity: {100 * args.moe_top_k / args.moe_num_experts:.0f}% active")
+            model = CamoXpertSparseMoE(3, 1, pretrained=True, backbone=args.backbone,
+                                       num_experts=args.moe_num_experts, top_k=args.moe_top_k).cuda()
+        else:
+            if is_main_process:
+                print("🎯 Using 100% COD-Specialized Architecture")
+            model = CamoXpertCOD(3, 1, pretrained=True, backbone=args.backbone).cuda()
     else:
         if is_main_process:
             print("📦 Using Standard CamoXpert Architecture")
