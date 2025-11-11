@@ -2,8 +2,11 @@
 Custom DDP launcher with memory-optimized configuration for Tesla T4
 Run with: python launch_ddp_custom.py
 
-Memory-safe settings:
-- Batch size: 20 per GPU (40 total with 2 GPUs)
+High-resolution settings targeting IoU 0.75:
+- Resolution: 416px (vs 352px baseline)
+- Batch size: 14 per GPU (28 total with 2 GPUs)
+- Accumulation: 2 steps (effective batch = 56)
+- Epochs: 200 (40 Stage 1 + 160 Stage 2)
 - Mixed precision (AMP) enabled for 40% memory savings
 - Gradient checkpointing enabled
 """
@@ -12,11 +15,14 @@ import torch
 
 # Set DDP environment variables
 ngpus = torch.cuda.device_count()
-batch_size = 20  # Safe for Tesla T4 with AMP
-stage2_batch = 16  # Even safer for stage 2
+batch_size = 14  # Reduced for 416px resolution
+stage2_batch = 10  # Even safer for stage 2 with high resolution
 
 print(f"🚀 Launching DDP training with {ngpus} GPUs...")
+print(f"   Resolution: 416px (targeting IoU 0.75)")
 print(f"   Total batch size: Stage 1 = {batch_size * ngpus}, Stage 2 = {stage2_batch * ngpus}")
+print(f"   Effective batch (w/ accumulation): Stage 1 = {batch_size * ngpus * 2}, Stage 2 = {stage2_batch * ngpus * 2}")
+print(f"   Total epochs: 200 (40 Stage 1 + 160 Stage 2)")
 print(f"   Mixed precision: Enabled (AMP)")
 print(f"   Gradient checkpointing: Enabled")
 print(f"   Memory optimization: Tesla T4 optimized\n")
@@ -34,12 +40,12 @@ torchrun --nproc_per_node={ngpus} --master_port=29500 train_ultimate.py train \
     --num-experts 7 \
     --batch-size {batch_size} \
     --stage2-batch-size {stage2_batch} \
-    --accumulation-steps 1 \
-    --img-size 352 \
-    --epochs 150 \
-    --stage1-epochs 30 \
+    --accumulation-steps 2 \
+    --img-size 416 \
+    --epochs 200 \
+    --stage1-epochs 40 \
     --lr 0.0008 \
-    --stage2-lr 0.00055 \
+    --stage2-lr 0.0006 \
     --scheduler cosine \
     --min-lr 0.00001 \
     --warmup-epochs 5 \
