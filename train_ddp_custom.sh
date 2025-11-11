@@ -7,8 +7,8 @@ echo "CAMOXPERT DDP TRAINING - TARGETING IoU 0.75"
 echo "=================================================="
 echo "GPUs: 2 × Tesla T4"
 echo "Resolution: 416px (vs 352px baseline)"
-echo "Total Batch: Stage 1 = 28, Stage 2 = 20"
-echo "Effective Batch (w/ grad accumulation): 56 / 40"
+echo "Total Batch: Stage 1 = 24, Stage 2 = 16"
+echo "Effective Batch (w/ grad accumulation): 48 / 32"
 echo "Mixed Precision: Enabled (AMP)"
 echo "Gradient Checkpointing: Enabled"
 echo "Epochs: 200 (40 Stage 1 + 160 Stage 2)"
@@ -21,8 +21,8 @@ torchrun --nproc_per_node=2 --master_port=29500 train_ultimate.py train \
     --checkpoint-dir /kaggle/working/checkpoints_cod_specialized \
     --backbone edgenext_base \
     --num-experts 7 \
-    --batch-size 14 \
-    --stage2-batch-size 10 \
+    --batch-size 12 \
+    --stage2-batch-size 8 \
     --accumulation-steps 2 \
     --img-size 416 \
     --epochs 200 \

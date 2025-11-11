@@ -4,8 +4,8 @@ Run with: python launch_ddp_custom.py
 
 High-resolution settings targeting IoU 0.75:
 - Resolution: 416px (vs 352px baseline)
-- Batch size: 14 per GPU (28 total with 2 GPUs)
-- Accumulation: 2 steps (effective batch = 56)
+- Batch size: 12 per GPU (24 total with 2 GPUs) - OOM-safe
+- Accumulation: 2 steps (effective batch = 48)
 - Epochs: 200 (40 Stage 1 + 160 Stage 2)
 - Mixed precision (AMP) enabled for 40% memory savings
 - Gradient checkpointing enabled
@@ -15,8 +15,8 @@ import torch
 
 # Set DDP environment variables
 ngpus = torch.cuda.device_count()
-batch_size = 14  # Reduced for 416px resolution
-stage2_batch = 10  # Even safer for stage 2 with high resolution
+batch_size = 12  # Memory-safe for 416px on Tesla T4
+stage2_batch = 8  # Even safer for stage 2 with high resolution
 
 print(f"🚀 Launching DDP training with {ngpus} GPUs...")
 print(f"   Resolution: 416px (targeting IoU 0.75)")
