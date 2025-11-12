@@ -54,13 +54,18 @@ class SparseRouter(nn.Module):
             )
 
         # Load balancing auxiliary loss coefficient
-        # Reduced to 0.001 to prevent gradient explosion
-        self.load_balance_loss_coef = 0.001
+        # Further reduced to 0.00001 to prevent gradient explosion at 416px
+        # Will be scaled up gradually during warmup
+        self.load_balance_loss_coef = 0.00001
 
-    def forward(self, x):
+        # Router stabilization
+        self.router_grad_clip = 1.0  # Clip router gradients to this norm
+
+    def forward(self, x, warmup_factor=1.0):
         """
         Args:
             x: Input features [B, C, H, W]
+            warmup_factor: Scale factor for load balance loss (0.0 to 1.0)
 
         Returns:
             expert_weights: [B, num_experts] or [B, num_experts, H, W]
@@ -70,9 +75,16 @@ class SparseRouter(nn.Module):
         # Compute routing logits
         logits = self.gate(x)  # [B, num_experts] or [B, num_experts, H, W]
 
-        # Softmax to get expert probabilities
+        # Clamp logits for numerical stability
+        logits = torch.clamp(logits, min=-10.0, max=10.0)
+
+        # Softmax to get expert probabilities with temperature scaling
+        temperature = 1.0  # Can be tuned for smoothness
         if self.routing_mode == 'global':
-            probs = F.softmax(logits, dim=1)  # [B, num_experts]
+            probs = F.softmax(logits / temperature, dim=1)  # [B, num_experts]
+
+            # Clamp probabilities to prevent extremes
+            probs = torch.clamp(probs, min=1e-6, max=1.0)
 
             # Select top-k experts
             top_k_probs, top_k_indices = torch.topk(probs, self.top_k, dim=1)
@@ -105,7 +117,10 @@ class SparseRouter(nn.Module):
             ideal_usage = 1.0 / self.num_experts
             load_balance_loss = ((expert_usage - ideal_usage) ** 2).sum()
 
-        return top_k_probs, top_k_indices, load_balance_loss * self.load_balance_loss_coef
+        # Apply warmup factor and coefficient
+        scaled_lb_loss = load_balance_loss * self.load_balance_loss_coef * warmup_factor
+
+        return top_k_probs, top_k_indices, scaled_lb_loss
 
 
 class SparseCODMoE(nn.Module):
@@ -250,9 +265,13 @@ class EfficientSparseCODMoE(nn.Module):
 
         self.top_k = top_k
 
-    def forward(self, x):
+    def forward(self, x, warmup_factor=1.0):
         """
         Efficient forward pass with minimal overhead
+
+        Args:
+            x: Input features [B, C, H, W]
+            warmup_factor: Scale factor for load balance loss (0.0 to 1.0)
 
         Returns:
             output: Enhanced features
@@ -262,7 +281,14 @@ class EfficientSparseCODMoE(nn.Module):
 
         # Compute routing scores [B, num_experts]
         routing_logits = self.router(x)
+
+        # Clamp for numerical stability
+        routing_logits = torch.clamp(routing_logits, min=-10.0, max=10.0)
+
         routing_probs = F.softmax(routing_logits, dim=1)
+
+        # Clamp probabilities
+        routing_probs = torch.clamp(routing_probs, min=1e-6, max=1.0)
 
         # Select top-k experts per sample
         top_k_probs, top_k_indices = torch.topk(routing_probs, self.top_k, dim=1)
@@ -281,10 +307,11 @@ class EfficientSparseCODMoE(nn.Module):
                 expert_output = self.experts[expert_id](x[b:b+1])
                 output[b:b+1] += expert_weight * expert_output
 
-        # Load balancing loss
+        # Load balancing loss with warmup
         expert_usage = routing_probs.mean(dim=0)
         ideal_usage = 1.0 / self.num_experts
-        load_balance_loss = 0.01 * ((expert_usage - ideal_usage) ** 2).sum()
+        # Reduced coefficient from 0.01 to 0.00001 for stability
+        load_balance_loss = 0.00001 * warmup_factor * ((expert_usage - ideal_usage) ** 2).sum()
 
         return output, load_balance_loss
 

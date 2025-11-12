@@ -278,10 +278,18 @@ def warmup_lr(optimizer, epoch, warmup_epochs, base_lr):
 
 
 def train_epoch(model, loader, criterion, optimizer, scaler, accumulation_steps, ema, epoch, total_epochs,
-                use_deep_sup, use_amp=True):
+                use_deep_sup, use_amp=True, use_sparse_moe=False):
     model.train()
     epoch_loss = 0
     optimizer.zero_grad(set_to_none=True)
+
+    # Calculate router warmup factor for Sparse MoE
+    # Gradually increase load balance loss over first 20 epochs
+    router_warmup_epochs = 20
+    if use_sparse_moe and epoch < router_warmup_epochs:
+        router_warmup_factor = (epoch + 1) / router_warmup_epochs
+    else:
+        router_warmup_factor = 1.0
 
     pbar = tqdm(enumerate(loader), total=len(loader), desc=f"Epoch {epoch + 1}/{total_epochs}")
 
@@ -296,7 +304,12 @@ def train_epoch(model, loader, criterion, optimizer, scaler, accumulation_steps,
             context = torch.cuda.amp.autocast(enabled=False)
 
         with context:
-            pred, aux_or_dict, deep = model(images, return_deep_supervision=use_deep_sup)
+            # Pass warmup factor to model if using sparse MoE
+            if use_sparse_moe:
+                pred, aux_or_dict, deep = model(images, return_deep_supervision=use_deep_sup,
+                                                warmup_factor=router_warmup_factor)
+            else:
+                pred, aux_or_dict, deep = model(images, return_deep_supervision=use_deep_sup)
 
             # Debug: Check for NaN/Inf in model outputs BEFORE loss
             if not torch.isfinite(pred).all():
@@ -347,7 +360,23 @@ def train_epoch(model, loader, criterion, optimizer, scaler, accumulation_steps,
             if use_amp:
                 scaler.unscale_(optimizer)
 
-            # Clip gradients MORE aggressively (0.5 instead of 1.0) to prevent explosions
+            # Extra aggressive clipping for router parameters if using sparse MoE
+            if use_sparse_moe:
+                router_params = []
+                other_params = []
+                for name, param in model.named_parameters():
+                    if param.grad is not None:
+                        # Check if this is a router parameter
+                        if 'router' in name or 'gate' in name:
+                            router_params.append(param)
+                        else:
+                            other_params.append(param)
+
+                # Clip router gradients more aggressively (0.1 vs 0.5)
+                if router_params:
+                    torch.nn.utils.clip_grad_norm_(router_params, 0.1)
+
+            # Clip all gradients MORE aggressively (0.5 instead of 1.0) to prevent explosions
             grad_norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
 
             # Check for NaN/Inf in gradients
@@ -675,7 +704,7 @@ def train(args):
 
             train_loss = train_epoch(model, train_loader, criterion, optimizer, scaler,
                                      args.accumulation_steps, ema, epoch, args.stage1_epochs, args.deep_supervision,
-                                     use_amp=not args.no_amp)
+                                     use_amp=not args.no_amp, use_sparse_moe=args.use_sparse_moe)
 
             # Step scheduler if it exists
             if scheduler is not None:
@@ -861,7 +890,7 @@ def train(args):
 
         train_loss = train_epoch(model, train_loader, criterion, optimizer, scaler,
                                  args.accumulation_steps, ema, epoch, args.epochs, args.deep_supervision,
-                                 use_amp=not args.no_amp)
+                                 use_amp=not args.no_amp, use_sparse_moe=args.use_sparse_moe)
 
         # Step scheduler if not in warmup and scheduler exists
         if not in_warmup and scheduler is not None:

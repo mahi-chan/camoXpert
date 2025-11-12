@@ -147,7 +147,7 @@ class CamoXpertSparseMoE(nn.Module):
         backbone = timm.create_model(backbone_name, pretrained=pretrained, features_only=True)
         return backbone
 
-    def forward(self, x, return_deep_supervision=False, return_routing_info=False):
+    def forward(self, x, return_deep_supervision=False, return_routing_info=False, warmup_factor=1.0):
         """
         Forward pass with sparse MoE routing
 
@@ -155,6 +155,7 @@ class CamoXpertSparseMoE(nn.Module):
             x: Input images [B, 3, H, W]
             return_deep_supervision: Whether to return deep supervision outputs
             return_routing_info: Whether to return expert routing information
+            warmup_factor: Scale factor for load balance loss (0.0 to 1.0)
 
         Returns:
             pred: Final prediction logits [B, 1, H, W]
@@ -174,7 +175,8 @@ class CamoXpertSparseMoE(nn.Module):
 
         for i, feat in enumerate(features):
             # Sparse MoE: Router selects top-k experts for this feature
-            enhanced_feat, lb_loss = self.moe_layers[i](feat)
+            # Pass warmup_factor to gradually enable load balance loss
+            enhanced_feat, lb_loss = self.moe_layers[i](feat, warmup_factor=warmup_factor)
             enhanced_features.append(enhanced_feat)
             total_load_balance_loss += lb_loss
 
