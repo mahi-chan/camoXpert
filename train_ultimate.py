@@ -284,8 +284,9 @@ def train_epoch(model, loader, criterion, optimizer, scaler, accumulation_steps,
     optimizer.zero_grad(set_to_none=True)
 
     # Calculate router warmup factor for Sparse MoE
-    # Gradually increase load balance loss over first 20 epochs
-    router_warmup_epochs = 20
+    # Gradually increase load balance loss over FULL Stage 1 (40 epochs)
+    # CRITICAL: Changed from 20 to 40 epochs after explosion at epoch 10
+    router_warmup_epochs = 40
     if use_sparse_moe and epoch < router_warmup_epochs:
         router_warmup_factor = (epoch + 1) / router_warmup_epochs
     else:

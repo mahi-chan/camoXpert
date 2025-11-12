@@ -54,14 +54,16 @@ class SparseRouter(nn.Module):
             )
 
         # Load balancing auxiliary loss coefficient - ADAPTIVE
-        # Starts at 0.00001 for stability, scales up to 0.0005 for specialization
-        # Warmup: 0.00001 (epochs 0-20, prevents explosion)
-        # Post-warmup: 0.0005 (epochs 20+, encourages specialization)
+        # Starts at 0.00001 for stability, scales up to 0.0001 for specialization
+        # Warmup: 0.00001 (epochs 0-40, prevents explosion)
+        # Post-warmup: 0.0001 (epochs 40+, encourages specialization)
+        # CRITICAL: 0.0001 is 10× more conservative than previous 0.0005 (which caused explosion)
         self.load_balance_loss_coef_min = 0.00001  # During warmup
-        self.load_balance_loss_coef_max = 0.0005   # After warmup
+        self.load_balance_loss_coef_max = 0.0001   # After warmup (reduced from 0.0005)
 
         # Entropy regularization coefficient (encourages diverse expert usage)
-        self.entropy_coef = 0.001  # Small bonus for high entropy routing
+        # Reduced for stability - log operations can be unstable at 416px
+        self.entropy_coef = 0.0005  # Reduced from 0.001 for stability
 
         # Router stabilization
         self.router_grad_clip = 1.0  # Clip router gradients to this norm
@@ -288,9 +290,10 @@ class EfficientSparseCODMoE(nn.Module):
         self.top_k = top_k
 
         # Adaptive load balance coefficient (like SparseRouter)
+        # CRITICAL: Reduced max from 0.0005 to 0.0001 to prevent explosion at 416px
         self.load_balance_loss_coef_min = 0.00001
-        self.load_balance_loss_coef_max = 0.0005
-        self.entropy_coef = 0.001
+        self.load_balance_loss_coef_max = 0.0001
+        self.entropy_coef = 0.0005
 
     def forward(self, x, warmup_factor=1.0):
         """
