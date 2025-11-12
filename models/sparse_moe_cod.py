@@ -53,17 +53,16 @@ class SparseRouter(nn.Module):
                 nn.Conv2d(dim // 4, num_experts, 1)
             )
 
-        # Load balancing auxiliary loss coefficient - ADAPTIVE
-        # Starts at 0.00001 for stability, scales up to 0.0001 for specialization
-        # Warmup: 0.00001 (epochs 0-40, prevents explosion)
-        # Post-warmup: 0.0001 (epochs 40+, encourages specialization)
-        # CRITICAL: 0.0001 is 10× more conservative than previous 0.0005 (which caused explosion)
-        self.load_balance_loss_coef_min = 0.00001  # During warmup
-        self.load_balance_loss_coef_max = 0.0001   # After warmup (reduced from 0.0005)
+        # Load balancing auxiliary loss coefficient - ULTRA CONSERVATIVE
+        # CRITICAL: Keep at 0.00001 FOREVER (no warmup, no increase)
+        # After crashes at epoch 10 and epoch 4, even 0.0001 is too high
+        # Router learns PRIMARILY from task loss, minimal auxiliary pressure
+        self.load_balance_loss_coef_min = 0.00001
+        self.load_balance_loss_coef_max = 0.00001  # NO INCREASE (was 0.0001, still too high)
 
-        # Entropy regularization coefficient (encourages diverse expert usage)
-        # Reduced for stability - log operations can be unstable at 416px
-        self.entropy_coef = 0.0005  # Reduced from 0.001 for stability
+        # Entropy regularization DISABLED (log operations numerically unstable at 416px)
+        # Router learns purely from task loss + minimal load balance
+        self.entropy_coef = 0.0  # DISABLED (was 0.0005, caused instability)
 
         # Router stabilization
         self.router_grad_clip = 1.0  # Clip router gradients to this norm
@@ -289,11 +288,11 @@ class EfficientSparseCODMoE(nn.Module):
 
         self.top_k = top_k
 
-        # Adaptive load balance coefficient (like SparseRouter)
-        # CRITICAL: Reduced max from 0.0005 to 0.0001 to prevent explosion at 416px
+        # Ultra conservative coefficients (matches SparseRouter)
+        # NO warmup, NO increase - constant minimal pressure
         self.load_balance_loss_coef_min = 0.00001
-        self.load_balance_loss_coef_max = 0.0001
-        self.entropy_coef = 0.0005
+        self.load_balance_loss_coef_max = 0.00001  # NO INCREASE
+        self.entropy_coef = 0.0  # DISABLED
 
     def forward(self, x, warmup_factor=1.0):
         """
