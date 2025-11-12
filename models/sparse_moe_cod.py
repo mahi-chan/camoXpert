@@ -53,10 +53,15 @@ class SparseRouter(nn.Module):
                 nn.Conv2d(dim // 4, num_experts, 1)
             )
 
-        # Load balancing auxiliary loss coefficient
-        # Further reduced to 0.00001 to prevent gradient explosion at 416px
-        # Will be scaled up gradually during warmup
-        self.load_balance_loss_coef = 0.00001
+        # Load balancing auxiliary loss coefficient - ADAPTIVE
+        # Starts at 0.00001 for stability, scales up to 0.0005 for specialization
+        # Warmup: 0.00001 (epochs 0-20, prevents explosion)
+        # Post-warmup: 0.0005 (epochs 20+, encourages specialization)
+        self.load_balance_loss_coef_min = 0.00001  # During warmup
+        self.load_balance_loss_coef_max = 0.0005   # After warmup
+
+        # Entropy regularization coefficient (encourages diverse expert usage)
+        self.entropy_coef = 0.001  # Small bonus for high entropy routing
 
         # Router stabilization
         self.router_grad_clip = 1.0  # Clip router gradients to this norm
@@ -97,6 +102,13 @@ class SparseRouter(nn.Module):
             ideal_usage = 1.0 / self.num_experts
             load_balance_loss = ((expert_usage - ideal_usage) ** 2).sum()
 
+            # Entropy regularization (encourage diverse routing per image)
+            # High entropy = router uses different experts for different images (GOOD)
+            # Low entropy = router always uses same experts (BAD - collapse)
+            entropy = -(probs * torch.log(probs + 1e-10)).sum(dim=1).mean()  # [B] -> scalar
+            # We SUBTRACT entropy loss (negative = reward high entropy)
+            entropy_loss = -entropy
+
         else:  # spatial
             probs = F.softmax(logits, dim=1)  # [B, num_experts, H, W]
             B, E, H, W = probs.shape
@@ -117,8 +129,18 @@ class SparseRouter(nn.Module):
             ideal_usage = 1.0 / self.num_experts
             load_balance_loss = ((expert_usage - ideal_usage) ** 2).sum()
 
-        # Apply warmup factor and coefficient
-        scaled_lb_loss = load_balance_loss * self.load_balance_loss_coef * warmup_factor
+            # Entropy regularization (spatial)
+            entropy = -(probs * torch.log(probs + 1e-10)).sum(dim=1).mean()
+            entropy_loss = -entropy
+
+        # Adaptive coefficient: interpolate from min to max based on warmup
+        # warmup_factor 0.0 -> coef_min (0.00001, stable)
+        # warmup_factor 1.0 -> coef_max (0.0005, encourages specialization)
+        adaptive_coef = self.load_balance_loss_coef_min + \
+                       warmup_factor * (self.load_balance_loss_coef_max - self.load_balance_loss_coef_min)
+
+        # Total routing loss = load balance + entropy regularization
+        scaled_lb_loss = load_balance_loss * adaptive_coef + entropy_loss * self.entropy_coef
 
         return top_k_probs, top_k_indices, scaled_lb_loss
 
@@ -265,6 +287,11 @@ class EfficientSparseCODMoE(nn.Module):
 
         self.top_k = top_k
 
+        # Adaptive load balance coefficient (like SparseRouter)
+        self.load_balance_loss_coef_min = 0.00001
+        self.load_balance_loss_coef_max = 0.0005
+        self.entropy_coef = 0.001
+
     def forward(self, x, warmup_factor=1.0):
         """
         Efficient forward pass with minimal overhead
@@ -307,13 +334,23 @@ class EfficientSparseCODMoE(nn.Module):
                 expert_output = self.experts[expert_id](x[b:b+1])
                 output[b:b+1] += expert_weight * expert_output
 
-        # Load balancing loss with warmup
+        # Load balancing loss
         expert_usage = routing_probs.mean(dim=0)
         ideal_usage = 1.0 / self.num_experts
-        # Reduced coefficient from 0.01 to 0.00001 for stability
-        load_balance_loss = 0.00001 * warmup_factor * ((expert_usage - ideal_usage) ** 2).sum()
+        load_balance_loss = ((expert_usage - ideal_usage) ** 2).sum()
 
-        return output, load_balance_loss
+        # Entropy regularization (encourage diverse routing)
+        entropy = -(routing_probs * torch.log(routing_probs + 1e-10)).sum(dim=1).mean()
+        entropy_loss = -entropy  # Negative to reward high entropy
+
+        # Adaptive coefficient based on warmup
+        adaptive_coef = self.load_balance_loss_coef_min + \
+                       warmup_factor * (self.load_balance_loss_coef_max - self.load_balance_loss_coef_min)
+
+        # Total routing loss
+        total_routing_loss = load_balance_loss * adaptive_coef + entropy_loss * self.entropy_coef
+
+        return output, total_routing_loss
 
 
 # Example usage

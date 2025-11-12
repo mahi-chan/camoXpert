@@ -722,6 +722,31 @@ def train(args):
 
             print(f"Loss: {train_loss:.4f} | IoU: {val_metrics['IoU']:.4f} | Dice: {val_metrics['Dice_Score']:.4f}")
 
+            # Monitor Sparse MoE router health
+            if args.use_sparse_moe and is_main_process:
+                # Get a batch to check router behavior
+                sample_imgs, _ = next(iter(val_loader))
+                sample_imgs = sample_imgs.cuda()
+                actual_model = get_actual_model(model)
+                with torch.no_grad():
+                    _, aux, _ = actual_model(sample_imgs, return_deep_supervision=False)
+                    if isinstance(aux, dict):
+                        lb_loss = aux.get('load_balance_loss', 0.0)
+                        warmup = aux.get('router_warmup_factor', 1.0)
+
+                        # Check router health
+                        if lb_loss > 0:
+                            lb_value = lb_loss.item() if torch.is_tensor(lb_loss) else lb_loss
+                            print(f"   Router LB Loss: {lb_value:.6f} | Warmup: {warmup:.2f}")
+
+                            # Warning thresholds
+                            if epoch >= 20:  # After warmup
+                                if lb_value < 0.00005:
+                                    print(f"   ⚠️  WARNING: Load balance loss very low - router may have collapsed!")
+                                    print(f"   ⚠️  All images might be using same experts (no specialization)")
+                                elif lb_value > 0.005:
+                                    print(f"   ⚠️  WARNING: Load balance loss very high - router unstable!")
+
             if val_metrics['IoU'] > best_iou:
                 best_iou = val_metrics['IoU']
                 # Save unwrapped model state dict (portable between single/multi-GPU)
@@ -910,6 +935,28 @@ def train(args):
         current_lr = optimizer.param_groups[0]['lr']
         lr_info = f" | LR: {current_lr:.6f}" if args.scheduler != 'none' or in_warmup else ""
         print(f"Loss: {train_loss:.4f} | IoU: {val_metrics['IoU']:.4f} | Dice: {val_metrics['Dice_Score']:.4f}{lr_info}")
+
+        # Monitor Sparse MoE router health (Stage 2)
+        if args.use_sparse_moe and is_main_process:
+            sample_imgs, _ = next(iter(val_loader))
+            sample_imgs = sample_imgs.cuda()
+            actual_model = get_actual_model(model)
+            with torch.no_grad():
+                _, aux, _ = actual_model(sample_imgs, return_deep_supervision=False)
+                if isinstance(aux, dict):
+                    lb_loss = aux.get('load_balance_loss', 0.0)
+                    warmup = aux.get('router_warmup_factor', 1.0)
+
+                    if lb_loss > 0:
+                        lb_value = lb_loss.item() if torch.is_tensor(lb_loss) else lb_loss
+                        print(f"   Router LB Loss: {lb_value:.6f} | Warmup: {warmup:.2f}")
+
+                        # Warning thresholds (stricter in Stage 2)
+                        if lb_value < 0.0001:
+                            print(f"   ⚠️  WARNING: Load balance loss very low - router may have collapsed!")
+                            print(f"   ⚠️  All images might be using same experts (no specialization)")
+                        elif lb_value > 0.01:
+                            print(f"   ⚠️  WARNING: Load balance loss very high - router unstable!")
 
         if val_metrics['IoU'] > best_iou:
             best_iou = val_metrics['IoU']

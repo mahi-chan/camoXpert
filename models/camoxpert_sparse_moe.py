@@ -230,7 +230,8 @@ class CamoXpertSparseMoE(nn.Module):
             'search_map': search_map,
             'refinements': refinements[:-1],  # Intermediate refinements (exclude final)
             'uncertainty': uncertainty,
-            'load_balance_loss': total_load_balance_loss  # For loss function
+            'load_balance_loss': total_load_balance_loss,  # For loss function
+            'router_warmup_factor': warmup_factor  # For monitoring
         }
 
         # Deep supervision
