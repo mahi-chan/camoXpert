@@ -34,7 +34,8 @@ def parse_args():
     parser.add_argument('command', type=str, choices=['train'])
     parser.add_argument('--dataset-path', type=str, required=True)
     parser.add_argument('--checkpoint-dir', type=str, default='./checkpoints')
-    parser.add_argument('--backbone', type=str, default='edgenext_base')
+    parser.add_argument('--backbone', type=str, default='pvt_v2_b2',
+                        help='Backbone: pvt_v2_b2 (SOTA for COD, recommended), edgenext_base (mobile), swin_tiny, convnext_tiny')
     parser.add_argument('--num-experts', type=int, default=7)
     parser.add_argument('--batch-size', type=int, default=2)
     parser.add_argument('--accumulation-steps', type=int, default=4)
